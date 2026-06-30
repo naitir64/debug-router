@@ -1,0 +1,24 @@
+debug_router_connector/src/device/android/AndroidDeviceManager.ts
+  h_8d09519521afb0 107,220-247
+test/e2e_test/connector_test/multiplexer/websocket_routing.js
+  h_8d09519521afb0 204
+debug_router_connector/src/multiplexer/daemon/entry.ts
+  h_8d09519521afb0 105-114
+test/integration/multiplexer/fixtures/fake_daemon_entry.js
+  h_8d09519521afb0 489-499
+test/e2e_test/connector_test/multiplexer/real_device.js
+  h_8d09519521afb0 224,262,271-272,275,279,281,284,288,290-300,305-306,308-311,313-314,316-319,476-481,483-509,520,523-524,526-529,534,536,540-548,550-554,583-596,630,741,953,961-965,1036-1123,1128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "676477750adde0ad4c1933c3acdda397655af3f3",
+  "prompts": {},
+  "humans": {
+    "h_8d09519521afb0": {
+      "author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
