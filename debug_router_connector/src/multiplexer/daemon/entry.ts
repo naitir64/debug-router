@@ -3,6 +3,8 @@
 // LICENSE file in the root directory of this source tree.
 
 import {
+  ControlRpcError,
+  ControlRpcRequest,
   MULTIPLEXER_MIN_SUPPORTED_PROTOCOL_VERSION,
   MULTIPLEXER_PROTOCOL_VERSION,
 } from "../protocol";
@@ -13,6 +15,10 @@ import {
   MultiplexerDaemonHost,
   MultiplexerDaemonOption,
 } from "./MultiplexerDaemon";
+import {
+  MultiplexerControlHost,
+  MultiplexerControlServer,
+} from "./MultiplexerControlServer";
 
 const ENTRY_CLEANUP_TIMEOUT = 3000;
 
@@ -74,7 +80,7 @@ export function createMultiplexerDaemon(
     daemonVersion: entryOption.daemonVersion,
     capabilities: entryOption.capabilities,
     heartbeatInterval: entryOption.heartbeatInterval,
-    host: new DiscoveryOnlyHost(entryOption.controlPort),
+    host: new ControlOnlyHost(entryOption),
   };
 
   return new MultiplexerDaemon(daemonOption);
@@ -109,16 +115,68 @@ export function parseEntryOption(argv: string[]): MultiplexerDaemonEntryOption {
   };
 }
 
-class DiscoveryOnlyHost implements MultiplexerDaemonHost {
-  constructor(private readonly controlPort: number) {}
+class ControlOnlyHost
+  implements MultiplexerDaemonHost, MultiplexerControlHost
+{
+  private readonly controlServer: MultiplexerControlServer;
 
-  start(): void {}
+  constructor(entryOption: MultiplexerDaemonEntryOption) {
+    this.controlServer = new MultiplexerControlServer({
+      host: this,
+      controlPort: entryOption.controlPort,
+      protocolVersion: entryOption.protocolVersion,
+      minSupportedProtocolVersion: entryOption.minSupportedProtocolVersion,
+      daemonVersion: entryOption.daemonVersion,
+      capabilities: entryOption.capabilities,
+    });
+  }
 
-  stop(): void {}
+  async start(): Promise<void> {
+    await this.controlServer.start();
+  }
+
+  async stop(): Promise<void> {
+    await this.controlServer.stop();
+  }
 
   getControlPort(): number {
-    return this.controlPort;
+    return this.controlServer.controlPort;
   }
+
+  handleControlRpc(
+    _controlId: number,
+    message: ControlRpcRequest,
+  ): unknown {
+    switch (message.method) {
+      case "connectDevices":
+      case "getDevices":
+      case "connectUsbClients":
+        return [];
+      case "startWatchClient":
+      case "stopWatchClient":
+      case "disconnectDevice":
+      case "reacquireLegacyOwnership":
+      case "startWSServer":
+      case "startWatchAllClients":
+      case "sendMessageToWeb":
+      case "sendMessageToApp":
+      case "sendMessage":
+      case "closeClient":
+        return undefined;
+      case "sendCustomizedMessage":
+      case "sendRawMessage":
+        throw createControlOnlyRpcError(message.method);
+      default:
+        throw createControlOnlyRpcError(String(message.method));
+    }
+  }
+}
+
+function createControlOnlyRpcError(method: string): ControlRpcError {
+  return {
+    code: "control-rpc-not-implemented",
+    message: `Multiplexer control RPC ${method} is not implemented in this split`,
+  };
 }
 
 function registerProcessCleanup(daemon: MultiplexerDaemon): void {

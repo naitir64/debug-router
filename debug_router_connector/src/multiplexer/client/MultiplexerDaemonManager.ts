@@ -5,14 +5,20 @@
 import fs from "fs";
 import path from "path";
 import { spawn as spawnChildProcess, SpawnOptions } from "child_process";
+import { get as httpGet } from "http";
 import { MULTIPLEXER_DAEMON_LOCK_NAME } from "../utils/paths";
 import { FileLock } from "../utils/FileLock";
 import { removeFileIfExists } from "../utils/atomic_file";
 import {
+  MULTIPLEXER_HEALTH_PATH,
   MULTIPLEXER_MIN_SUPPORTED_PROTOCOL_VERSION,
   MULTIPLEXER_PROTOCOL_VERSION,
   MultiplexerDiscoveryInfo,
 } from "../protocol/discovery";
+import {
+  isMultiplexerHealthResponse,
+  parseJsonValue,
+} from "../protocol/validation";
 import {
   MultiplexerDiscovery,
   MultiplexerDiscoveryValidation,
@@ -21,7 +27,9 @@ import {
 export const DEFAULT_MULTIPLEXER_STARTUP_TIMEOUT = 5000;
 export const DEFAULT_MULTIPLEXER_READY_POLL_INTERVAL = 100;
 export const DEFAULT_MULTIPLEXER_REPLACEMENT_TIMEOUT = 1000;
+export const DEFAULT_MULTIPLEXER_HEALTH_CHECK_TIMEOUT = 500;
 const DEFAULT_MULTIPLEXER_SPAWN_LOCK_STALE_BUFFER = 1000;
+const MULTIPLEXER_HEALTH_RESPONSE_LIMIT = 4096;
 
 export type MultiplexerDaemonReplaceReason =
   | "daemon-protocol-older-than-connector"
@@ -54,6 +62,7 @@ export type MultiplexerDaemonManagerOption = {
   capabilities?: string[];
   readyPollInterval?: number;
   replacementTimeout?: number;
+  healthCheckTimeout?: number;
 
   // only used for testing
   spawn?: MultiplexerDaemonSpawn;
@@ -77,6 +86,7 @@ export class MultiplexerDaemonManager {
   readonly capabilities?: string[];
   private readonly readyPollInterval: number;
   private readonly replacementTimeout: number;
+  private readonly healthCheckTimeout: number;
   private readonly spawnLockStaleTimeout: number;
   private readonly spawnProcess: MultiplexerDaemonSpawn;
   private readonly killProcess: (pid: number, signal: NodeJS.Signals) => void;
@@ -107,6 +117,8 @@ export class MultiplexerDaemonManager {
       option.readyPollInterval ?? DEFAULT_MULTIPLEXER_READY_POLL_INTERVAL;
     this.replacementTimeout =
       option.replacementTimeout ?? DEFAULT_MULTIPLEXER_REPLACEMENT_TIMEOUT;
+    this.healthCheckTimeout =
+      option.healthCheckTimeout ?? DEFAULT_MULTIPLEXER_HEALTH_CHECK_TIMEOUT;
     this.spawnLockStaleTimeout =
       this.startupTimeout +
       this.replacementTimeout +
@@ -125,7 +137,17 @@ export class MultiplexerDaemonManager {
     validation: MultiplexerDiscoveryValidation,
   ): Promise<MultiplexerDiscoveryInfo> {
     if (validation.status === "usable") {
-      return validation.info;
+      const healthCheck = await this.checkDaemonHealth(validation.info);
+      if (healthCheck.ok) {
+        return validation.info;
+      }
+
+      return this.ensureDaemonWithSpawnLock(async () => {
+        await this.waitUntilUnhealthyDaemonCanSpawn(
+          validation.info,
+          this.startupTimeout,
+        );
+      });
     }
 
     if (validation.status === "replace-required") {
@@ -162,13 +184,19 @@ export class MultiplexerDaemonManager {
   async waitUntilReady(timeout: number): Promise<MultiplexerDiscoveryInfo> {
     const startedAt = this.now();
     let lastValidation: MultiplexerDiscoveryValidation | null = null;
+    let lastHealthCheckFailure: string | null = null;
 
     while (this.now() - startedAt <= timeout) {
       const validation = this.discovery.validateDiscovery();
       lastValidation = validation;
 
       if (validation.status === "usable") {
-        return validation.info;
+        const healthCheck = await this.checkDaemonHealth(validation.info);
+        if (healthCheck.ok) {
+          return validation.info;
+        }
+
+        lastHealthCheckFailure = healthCheck.reason;
       }
 
       await this.sleepFor(this.readyPollInterval);
@@ -177,7 +205,7 @@ export class MultiplexerDaemonManager {
     throw new Error(
       `Timed out waiting for multiplexer daemon: ${formatValidation(
         lastValidation,
-      )}`,
+      )}${formatHealthCheckFailure(lastHealthCheckFailure)}`,
     );
   }
 
@@ -249,7 +277,7 @@ export class MultiplexerDaemonManager {
 
     const startedAt = this.now();
     while (this.now() - startedAt <= this.replacementTimeout) {
-      if (this.hasDaemonYielded(info)) {
+      if (await this.hasDaemonYielded(info)) {
         return true;
       }
       await this.sleepFor(this.readyPollInterval);
@@ -296,7 +324,10 @@ export class MultiplexerDaemonManager {
     try {
       const validation = this.discovery.validateDiscovery();
       if (validation.status === "usable") {
-        return validation.info;
+        const healthCheck = await this.checkDaemonHealth(validation.info);
+        if (healthCheck.ok) {
+          return validation.info;
+        }
       }
 
       await beforeSpawn();
@@ -331,6 +362,43 @@ export class MultiplexerDaemonManager {
     }
   }
 
+  private async waitUntilUnhealthyDaemonCanSpawn(
+    info: MultiplexerDiscoveryInfo,
+    timeout: number,
+  ): Promise<void> {
+    const startedAt = this.now();
+
+    while (this.now() - startedAt <= timeout) {
+      const daemonLockExists = fs.existsSync(this.daemonLock.lockPath);
+      if (
+        !daemonLockExists ||
+        this.daemonLock.isStale(this.staleTimeout, this.now())
+      ) {
+        this.cleanupKnownUnhealthyDaemon();
+        return;
+      }
+
+      const validation = this.discovery.validateDiscovery();
+      if (
+        validation.status !== "usable" ||
+        validation.info.pid !== info.pid ||
+        validation.info.controlPort !== info.controlPort
+      ) {
+        await this.waitUntilUnusableDaemonCanSpawn(
+          Math.max(0, timeout - (this.now() - startedAt)),
+        );
+        return;
+      }
+
+      await this.sleepFor(this.readyPollInterval);
+    }
+  }
+
+  private cleanupKnownUnhealthyDaemon(): void {
+    removeFileIfExists(this.discovery.discoveryPath);
+    fs.rmSync(this.daemonLock.lockPath, { recursive: true, force: true });
+  }
+
   private createDaemonEntryArgs(): string[] {
     const args = [
       "--discovery-path",
@@ -360,18 +428,100 @@ export class MultiplexerDaemonManager {
     return args;
   }
 
-  private hasDaemonYielded(info: MultiplexerDiscoveryInfo): boolean {
-    const validation = this.discovery.validateDiscovery();
+  private checkDaemonHealth(
+    info: MultiplexerDiscoveryInfo,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
     if (
-      (validation.status === "usable" ||
-        validation.status === "replace-required") &&
-      validation.info.pid === info.pid &&
-      validation.info.controlPort === info.controlPort
+      !Number.isInteger(info.controlPort) ||
+      info.controlPort <= 0 ||
+      info.controlPort > 65535
     ) {
-      return false;
+      return Promise.resolve({
+        ok: false,
+        reason: `invalid-control-port:${info.controlPort}`,
+      });
     }
 
-    return true;
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: { ok: true } | { ok: false; reason: string }) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        resolve(result);
+      };
+
+      const request = httpGet(
+        {
+          host: "127.0.0.1",
+          port: info.controlPort,
+          path: MULTIPLEXER_HEALTH_PATH,
+          timeout: this.healthCheckTimeout,
+        },
+        (response) => {
+          if (response.statusCode !== 200) {
+            response.resume();
+            finish({
+              ok: false,
+              reason: `status:${response.statusCode ?? "unknown"}`,
+            });
+            return;
+          }
+
+          response.setEncoding("utf8");
+          let body = "";
+          response.on("data", (chunk) => {
+            body += chunk;
+            if (body.length > MULTIPLEXER_HEALTH_RESPONSE_LIMIT) {
+              finish({
+                ok: false,
+                reason: "multiplexer health response is too large",
+              });
+              response.destroy();
+              request.destroy();
+            }
+          });
+          response.on("error", (error) => {
+            finish({ ok: false, reason: error.message });
+          });
+          response.on("end", () => {
+            const value = parseJsonValue(body);
+            if (!isMultiplexerHealthResponse(value)) {
+              finish({ ok: false, reason: "invalid-health-response" });
+              return;
+            }
+
+            if (value.pid !== info.pid) {
+              finish({ ok: false, reason: "pid-mismatch" });
+              return;
+            }
+
+            if (value.protocolVersion !== info.protocolVersion) {
+              finish({ ok: false, reason: "protocol-version-mismatch" });
+              return;
+            }
+
+            finish({ ok: true });
+          });
+        },
+      );
+
+      request.on("timeout", () => {
+        request.destroy(new Error("multiplexer health check timed out"));
+      });
+      request.on("error", (error) => {
+        finish({ ok: false, reason: error.message });
+      });
+    });
+  }
+
+  private async hasDaemonYielded(
+    info: MultiplexerDiscoveryInfo,
+  ): Promise<boolean> {
+    const healthCheck = await this.checkDaemonHealth(info);
+    return !healthCheck.ok;
   }
 }
 
@@ -403,6 +553,10 @@ function formatValidation(
   }
 
   return `unusable/${validation.reason}`;
+}
+
+function formatHealthCheckFailure(reason: string | null): string {
+  return reason ? `, health-check:${reason}` : "";
 }
 
 function isConnectorProtocolTooOld(

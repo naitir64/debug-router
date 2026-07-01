@@ -4,6 +4,7 @@
 
 const assert = require("assert");
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 
@@ -24,6 +25,36 @@ function createTempDir() {
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function readHealth(port) {
+  return new Promise((resolve, reject) => {
+    const request = http.get(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/health",
+      },
+      (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolve({
+              statusCode: response.statusCode,
+              body: JSON.parse(body),
+            });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+    request.on("error", reject);
+  });
 }
 
 function stubProcessOnce() {
@@ -178,7 +209,7 @@ describe("multiplexer daemon entry", function () {
     );
   });
 
-  it("creates a discovery-only daemon with parsed discovery fields", function () {
+  it("creates a control-only daemon with parsed discovery fields", function () {
     const discoveryPath = path.join(tempDir, "daemon.json");
     const daemonLockPath = path.join(tempDir, "daemon.lock");
     const daemon = createMultiplexerDaemon({
@@ -186,22 +217,22 @@ describe("multiplexer daemon entry", function () {
       daemonLockPath,
       protocolVersion: 3,
       minSupportedProtocolVersion: 2,
-      controlPort: 0,
+      controlPort: 9333,
       heartbeatInterval: 100000,
       daemonVersion: "0.0.3",
-      capabilities: ["daemon", "discovery"],
+      capabilities: ["daemon", "control"],
     });
 
     const info = daemon.createDiscoveryInfo();
-    assert.strictEqual(info.controlPort, 0);
+    assert.strictEqual(info.controlPort, 9333);
     assert.strictEqual(info.protocolVersion, 3);
     assert.strictEqual(info.minSupportedProtocolVersion, 2);
     assert.strictEqual(info.daemonVersion, "0.0.3");
-    assert.deepStrictEqual(info.capabilities, ["daemon", "discovery"]);
+    assert.deepStrictEqual(info.capabilities, ["daemon", "control"]);
     assert.strictEqual(fs.existsSync(discoveryPath), false);
   });
 
-  it("starts a daemon entry, writes discovery, and registers cleanup handlers", async function () {
+  it("starts a daemon entry, writes discovery with health, and registers cleanup handlers", async function () {
     const processStub = stubProcessOnce();
     const discoveryPath = path.join(tempDir, "daemon.json");
     const daemonLockPath = path.join(tempDir, "daemon.lock");
@@ -220,16 +251,26 @@ describe("multiplexer daemon entry", function () {
         "--daemon-version",
         "0.0.1",
         "--capabilities",
-        "daemon,discovery",
+        "daemon,control",
       ]);
 
       const discovery = readJson(discoveryPath);
       assert.strictEqual(discovery.pid, process.pid);
       assert.strictEqual(discovery.protocolVersion, 1);
       assert.strictEqual(discovery.minSupportedProtocolVersion, 1);
-      assert.strictEqual(discovery.controlPort, 0);
+      assert.strictEqual(Number.isInteger(discovery.controlPort), true);
+      assert.notStrictEqual(discovery.controlPort, 0);
       assert.strictEqual(discovery.daemonVersion, "0.0.1");
-      assert.deepStrictEqual(discovery.capabilities, ["daemon", "discovery"]);
+      assert.deepStrictEqual(discovery.capabilities, ["daemon", "control"]);
+
+      const health = await readHealth(discovery.controlPort);
+      assert.strictEqual(health.statusCode, 200);
+      assert.strictEqual(health.body.ok, true);
+      assert.strictEqual(health.body.pid, process.pid);
+      assert.strictEqual(health.body.protocolVersion, 1);
+      assert.strictEqual(health.body.minSupportedProtocolVersion, 1);
+      assert.strictEqual(health.body.daemonVersion, "0.0.1");
+      assert.deepStrictEqual(health.body.capabilities, ["daemon", "control"]);
       assert.deepStrictEqual(
         processStub.registrations.map((registration) => registration.event),
         [
