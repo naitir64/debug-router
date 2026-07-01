@@ -217,6 +217,14 @@ export class ConnectionTraceRecorder {
     });
   }
 
+  recordWebsocketServerStarted(metadata?: Record<string, any>): void {
+    this.recordNode("websocket_server_started", undefined, metadata);
+  }
+
+  recordWebsocketServerStopped(metadata?: Record<string, any>): void {
+    this.recordNode("websocket_server_stopped", undefined, metadata);
+  }
+
   recordLegacyOwnershipAttached(metadata?: Record<string, any>): void {
     this.recordNode("legacy_ownership_attached", undefined, metadata);
   }
