@@ -7,6 +7,11 @@ import type {
   ControlRpcMethod,
   ControlRpcRequest,
   ControlRpcResponse,
+  MultiplexerHandshakeErrorResponse,
+  MultiplexerHealthRequest,
+  MultiplexerHealthResponse,
+  MultiplexerRegisterRequest,
+  MultiplexerRegisterResponse,
 } from "./control";
 import type { MultiplexerDebugInfo } from "./debuginfo";
 import type { ControlEvent } from "./event";
@@ -162,6 +167,57 @@ export function isSnapshot(value: unknown): value is Snapshot {
   );
 }
 
+export function isMultiplexerHealthRequest(
+  value: unknown,
+): value is MultiplexerHealthRequest {
+  return (
+    isRecord(value) &&
+    value.kind === "health" &&
+    isOptional(value.debugInfo, isMultiplexerDebugInfo)
+  );
+}
+
+export function isMultiplexerHealthResponse(
+  value: unknown,
+): value is MultiplexerHealthResponse {
+  return (
+    isRecord(value) &&
+    value.kind === "health-response" &&
+    value.ok === true &&
+    isNumber(value.protocolVersion) &&
+    isBoolean(value.isInUse) &&
+    isOptional(value.debugInfo, isMultiplexerDebugInfo)
+  );
+}
+
+export function isMultiplexerHandshakeErrorResponse(
+  value: unknown,
+): value is MultiplexerHandshakeErrorResponse {
+  return (
+    isRecord(value) &&
+    value.kind === "handshake-error-response" &&
+    isControlRpcError(value.error)
+  );
+}
+
+export function isMultiplexerRegisterRequest(
+  value: unknown,
+): value is MultiplexerRegisterRequest {
+  return (
+    isRecord(value) &&
+    value.kind === "register" &&
+    isOptional(value.debugInfo, isMultiplexerDebugInfo)
+  );
+}
+
+export function isMultiplexerRegisterResponse(
+  value: unknown,
+): value is MultiplexerRegisterResponse {
+  return (
+    isRecord(value) && value.kind === "register-response" && value.ok === true
+  );
+}
+
 export function isControlRpcRequest(
   value: unknown,
 ): value is ControlRpcRequest {
@@ -228,7 +284,7 @@ export function isControlEvent(value: unknown): value is ControlEvent {
   }
 }
 
-function isControlRpcParams(
+export function isControlRpcParams(
   method: ControlRpcMethod,
   params: unknown,
 ): boolean {
