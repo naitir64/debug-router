@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "7a2cfdabe32745c696a83e0b083afe526b9c5955",
+  "prompts": {},
+  "humans": {
+    "h_8d09519521afb0": {
+      "author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
