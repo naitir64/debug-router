@@ -720,7 +720,7 @@ Multiplexer no longer lets each connector process compete for the legacy `Latest
 
 Current `LegacyOwnershipGuard.start()` behavior:
 
-1. If `DriverCloseMultiOpen=true`, enter attached state directly and emit `daemon-started`.
+1. If `DriverCloseMultiOpen=true`, disable the guard: silently enter `attached` without touching the legacy owner file, starting the monitor, or emitting ownership events. Later reacquire requests are no-ops. Otherwise, Host exposes physical state only after the guard has explicitly entered `attached`.
 2. Otherwise, create the legacy driver dir and remove the old `lockfile` directory.
 3. Write daemon pid into `LatestDriverProcess`.
 4. Check the owner file every 500 ms.
