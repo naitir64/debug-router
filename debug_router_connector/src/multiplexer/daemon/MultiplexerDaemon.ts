@@ -183,7 +183,7 @@ export class MultiplexerDaemon {
     const controlPort = this.host?.getControlPort?.() ?? 0;
     if (
       !Number.isInteger(controlPort) ||
-      controlPort < 0 ||
+      controlPort <= 0 ||
       controlPort > 65535
     ) {
       throw new Error(

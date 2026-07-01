@@ -15,6 +15,7 @@ import {
   MULTIPLEXER_PROTOCOL_VERSION,
   MultiplexerDiscoveryInfo,
 } from "../protocol/discovery";
+import type { PhysicalConnectorOption } from "../../physical/PhysicalConnector";
 import {
   isMultiplexerHealthResponse,
   parseJsonValue,
@@ -60,6 +61,14 @@ export type MultiplexerDaemonManagerOption = {
   minSupportedProtocolVersion?: number;
   daemonVersion?: string;
   capabilities?: string[];
+  legacyDriverDir?: string;
+  multiplexerDaemonIdleTimeout?: number;
+  enableWebSocket?: boolean;
+  websocketOption?: {
+    port?: number;
+    roomId?: string;
+  };
+  physicalConnectorOption?: PhysicalConnectorOption;
   readyPollInterval?: number;
   replacementTimeout?: number;
   healthCheckTimeout?: number;
@@ -84,6 +93,14 @@ export class MultiplexerDaemonManager {
   readonly minSupportedProtocolVersion: number;
   readonly daemonVersion?: string;
   readonly capabilities?: string[];
+  readonly legacyDriverDir?: string;
+  readonly multiplexerDaemonIdleTimeout?: number;
+  readonly enableWebSocket?: boolean;
+  readonly websocketOption?: {
+    port?: number;
+    roomId?: string;
+  };
+  readonly physicalConnectorOption?: PhysicalConnectorOption;
   private readonly readyPollInterval: number;
   private readonly replacementTimeout: number;
   private readonly healthCheckTimeout: number;
@@ -113,6 +130,11 @@ export class MultiplexerDaemonManager {
       MULTIPLEXER_MIN_SUPPORTED_PROTOCOL_VERSION;
     this.daemonVersion = option.daemonVersion;
     this.capabilities = option.capabilities;
+    this.legacyDriverDir = option.legacyDriverDir;
+    this.multiplexerDaemonIdleTimeout = option.multiplexerDaemonIdleTimeout;
+    this.enableWebSocket = option.enableWebSocket;
+    this.websocketOption = option.websocketOption;
+    this.physicalConnectorOption = option.physicalConnectorOption;
     this.readyPollInterval =
       option.readyPollInterval ?? DEFAULT_MULTIPLEXER_READY_POLL_INTERVAL;
     this.replacementTimeout =
@@ -423,6 +445,36 @@ export class MultiplexerDaemonManager {
 
     if (this.capabilities?.length) {
       args.push("--capabilities", this.capabilities.join(","));
+    }
+
+    if (this.legacyDriverDir) {
+      args.push("--legacy-driver-dir", this.legacyDriverDir);
+    }
+
+    if (this.multiplexerDaemonIdleTimeout !== undefined) {
+      args.push(
+        "--multiplexer-daemon-idle-timeout",
+        String(this.multiplexerDaemonIdleTimeout),
+      );
+    }
+
+    if (this.enableWebSocket !== undefined) {
+      args.push("--enable-websocket", String(this.enableWebSocket));
+    }
+
+    if (this.websocketOption?.port !== undefined) {
+      args.push("--websocket-port", String(this.websocketOption.port));
+    }
+
+    if (this.websocketOption?.roomId !== undefined) {
+      args.push("--websocket-room-id", this.websocketOption.roomId);
+    }
+
+    if (this.physicalConnectorOption !== undefined) {
+      args.push(
+        "--physical-connector-option",
+        JSON.stringify(this.physicalConnectorOption),
+      );
     }
 
     return args;

@@ -3,8 +3,6 @@
 // LICENSE file in the root directory of this source tree.
 
 import {
-  ControlRpcError,
-  ControlRpcRequest,
   MULTIPLEXER_MIN_SUPPORTED_PROTOCOL_VERSION,
   MULTIPLEXER_PROTOCOL_VERSION,
 } from "../protocol";
@@ -15,10 +13,8 @@ import {
   MultiplexerDaemonHost,
   MultiplexerDaemonOption,
 } from "./MultiplexerDaemon";
-import {
-  MultiplexerControlHost,
-  MultiplexerControlServer,
-} from "./MultiplexerControlServer";
+import type { PhysicalConnectorOption } from "../../physical/PhysicalConnector";
+import { MultiplexerHost } from "./MultiplexerHost";
 
 const ENTRY_CLEANUP_TIMEOUT = 3000;
 
@@ -31,9 +27,21 @@ export type MultiplexerDaemonEntryOption = {
   heartbeatInterval: number;
   daemonVersion?: string;
   capabilities?: string[];
+  legacyDriverDir?: string;
+  multiplexerDaemonIdleTimeout?: number;
+  enableWebSocket?: boolean;
+  websocketOption?: {
+    port?: number;
+    roomId?: string;
+  };
+  physicalConnectorOption?: PhysicalConnectorOption;
 };
 
-type EntryArgKey = keyof MultiplexerDaemonEntryOption;
+type EntryArgKey =
+  | keyof MultiplexerDaemonEntryOption
+  | "websocketPort"
+  | "websocketRoomId";
+
 type RawEntryArgs = Partial<Record<EntryArgKey, string | true>>;
 
 const OPTION_ALIASES: Record<string, EntryArgKey> = {
@@ -52,6 +60,18 @@ const OPTION_ALIASES: Record<string, EntryArgKey> = {
   "daemon-version": "daemonVersion",
   daemonVersion: "daemonVersion",
   capabilities: "capabilities",
+  "legacy-driver-dir": "legacyDriverDir",
+  legacyDriverDir: "legacyDriverDir",
+  "multiplexer-daemon-idle-timeout": "multiplexerDaemonIdleTimeout",
+  multiplexerDaemonIdleTimeout: "multiplexerDaemonIdleTimeout",
+  "enable-websocket": "enableWebSocket",
+  enableWebSocket: "enableWebSocket",
+  "websocket-port": "websocketPort",
+  websocketPort: "websocketPort",
+  "websocket-room-id": "websocketRoomId",
+  websocketRoomId: "websocketRoomId",
+  "physical-connector-option": "physicalConnectorOption",
+  physicalConnectorOption: "physicalConnectorOption",
 };
 
 export async function startMultiplexerDaemonEntry(
@@ -72,6 +92,7 @@ export async function startMultiplexerDaemonEntry(
 export function createMultiplexerDaemon(
   entryOption: MultiplexerDaemonEntryOption,
 ): MultiplexerDaemon {
+  const host = createEntryHost(entryOption);
   const daemonOption: MultiplexerDaemonOption = {
     discoveryPath: entryOption.discoveryPath,
     daemonLockPath: entryOption.daemonLockPath,
@@ -80,8 +101,23 @@ export function createMultiplexerDaemon(
     daemonVersion: entryOption.daemonVersion,
     capabilities: entryOption.capabilities,
     heartbeatInterval: entryOption.heartbeatInterval,
-    host: new ControlOnlyHost(entryOption),
+    host,
+    onIdleTimeout: (stopError) => {
+      if (stopError) {
+        defaultLogger.error(
+          `Multiplexer daemon idle cleanup failed: ${
+            (stopError as any)?.message
+          }`,
+        );
+      }
+      process.exit(stopError ? 1 : 0);
+    },
   };
+  if (entryOption.multiplexerDaemonIdleTimeout !== undefined) {
+    daemonOption.hostOption = {
+      multiplexerDaemonIdleTimeout: entryOption.multiplexerDaemonIdleTimeout,
+    };
+  }
 
   return new MultiplexerDaemon(daemonOption);
 }
@@ -90,8 +126,11 @@ export function parseEntryOption(argv: string[]): MultiplexerDaemonEntryOption {
   const rawArgs = parseRawArgs(argv);
   const discoveryPath = getRequiredString(rawArgs, "discoveryPath");
   const daemonLockPath = getRequiredString(rawArgs, "daemonLockPath");
+  const enableWebSocket = getOptionalBoolean(rawArgs, "enableWebSocket");
+  const websocketOption = parseWebSocketOption(rawArgs);
+  const physicalConnectorOption = parsePhysicalConnectorOption(rawArgs);
 
-  return {
+  const option: MultiplexerDaemonEntryOption = {
     discoveryPath,
     daemonLockPath,
     protocolVersion: getOptionalNumber(
@@ -113,70 +152,57 @@ export function parseEntryOption(argv: string[]): MultiplexerDaemonEntryOption {
     daemonVersion: getOptionalString(rawArgs, "daemonVersion"),
     capabilities: parseCapabilities(getOptionalString(rawArgs, "capabilities")),
   };
+  const legacyDriverDir = getOptionalString(rawArgs, "legacyDriverDir");
+  if (legacyDriverDir !== undefined) {
+    option.legacyDriverDir = legacyDriverDir;
+  }
+  const multiplexerDaemonIdleTimeout = getOptionalNumberOrUndefined(
+    rawArgs,
+    "multiplexerDaemonIdleTimeout",
+  );
+  if (multiplexerDaemonIdleTimeout !== undefined) {
+    option.multiplexerDaemonIdleTimeout = multiplexerDaemonIdleTimeout;
+  }
+  if (enableWebSocket !== undefined) {
+    option.enableWebSocket = enableWebSocket;
+  }
+  if (websocketOption !== undefined) {
+    option.websocketOption = websocketOption;
+  }
+  if (physicalConnectorOption !== undefined) {
+    option.physicalConnectorOption = physicalConnectorOption;
+  }
+  return option;
 }
 
-class ControlOnlyHost
-  implements MultiplexerDaemonHost, MultiplexerControlHost
-{
-  private readonly controlServer: MultiplexerControlServer;
-
-  constructor(entryOption: MultiplexerDaemonEntryOption) {
-    this.controlServer = new MultiplexerControlServer({
-      host: this,
-      controlPort: entryOption.controlPort,
-      protocolVersion: entryOption.protocolVersion,
-      minSupportedProtocolVersion: entryOption.minSupportedProtocolVersion,
-      daemonVersion: entryOption.daemonVersion,
-      capabilities: entryOption.capabilities,
+function createEntryHost(
+  entryOption: MultiplexerDaemonEntryOption,
+): MultiplexerDaemonHost {
+  const hostOption = {
+    controlPort: entryOption.controlPort,
+    protocolVersion: entryOption.protocolVersion,
+    minSupportedProtocolVersion: entryOption.minSupportedProtocolVersion,
+    daemonVersion: entryOption.daemonVersion,
+    capabilities: entryOption.capabilities,
+  };
+  if (entryOption.legacyDriverDir !== undefined) {
+    Object.assign(hostOption, { legacyDriverDir: entryOption.legacyDriverDir });
+  }
+  if (entryOption.multiplexerDaemonIdleTimeout !== undefined) {
+    Object.assign(hostOption, {
+      multiplexerDaemonIdleTimeout: entryOption.multiplexerDaemonIdleTimeout,
     });
   }
-
-  async start(): Promise<void> {
-    await this.controlServer.start();
+  if (entryOption.enableWebSocket !== undefined) {
+    Object.assign(hostOption, { enableWebSocket: entryOption.enableWebSocket });
   }
-
-  async stop(): Promise<void> {
-    await this.controlServer.stop();
+  if (entryOption.websocketOption !== undefined) {
+    Object.assign(hostOption, { websocketOption: entryOption.websocketOption });
   }
-
-  getControlPort(): number {
-    return this.controlServer.controlPort;
+  if (entryOption.physicalConnectorOption !== undefined) {
+    Object.assign(hostOption, entryOption.physicalConnectorOption);
   }
-
-  handleControlRpc(
-    _controlId: number,
-    message: ControlRpcRequest,
-  ): unknown {
-    switch (message.method) {
-      case "connectDevices":
-      case "getDevices":
-      case "connectUsbClients":
-        return [];
-      case "startWatchClient":
-      case "stopWatchClient":
-      case "disconnectDevice":
-      case "reacquireLegacyOwnership":
-      case "startWSServer":
-      case "startWatchAllClients":
-      case "sendMessageToWeb":
-      case "sendMessageToApp":
-      case "sendMessage":
-      case "closeClient":
-        return undefined;
-      case "sendCustomizedMessage":
-      case "sendRawMessage":
-        throw createControlOnlyRpcError(message.method);
-      default:
-        throw createControlOnlyRpcError(String(message.method));
-    }
-  }
-}
-
-function createControlOnlyRpcError(method: string): ControlRpcError {
-  return {
-    code: "control-rpc-not-implemented",
-    message: `Multiplexer control RPC ${method} is not implemented in this split`,
-  };
+  return new MultiplexerHost(hostOption);
 }
 
 function registerProcessCleanup(daemon: MultiplexerDaemon): void {
@@ -323,6 +349,72 @@ function getOptionalNumber(
   return numberValue;
 }
 
+function getOptionalNumberOrUndefined(
+  rawArgs: RawEntryArgs,
+  key: keyof MultiplexerDaemonEntryOption,
+): number | undefined {
+  const value = rawArgs[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const numberValue = typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isFinite(numberValue) || numberValue < 0) {
+    throw new Error(`Invalid multiplexer daemon option ${key}: ${value}`);
+  }
+
+  return numberValue;
+}
+
+function getOptionalBoolean(
+  rawArgs: RawEntryArgs,
+  key: keyof MultiplexerDaemonEntryOption,
+): boolean | undefined {
+  const value = rawArgs[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === true) {
+    return true;
+  }
+
+  if (value === "true") {
+    return true;
+  }
+
+  if (value === "false") {
+    return false;
+  }
+
+  throw new Error(`Invalid multiplexer daemon option ${key}: ${value}`);
+}
+
+function parseWebSocketOption(
+  rawArgs: RawEntryArgs,
+): MultiplexerDaemonEntryOption["websocketOption"] {
+  const option: MultiplexerDaemonEntryOption["websocketOption"] = {};
+  const port = rawArgs.websocketPort;
+  if (port !== undefined) {
+    const numberValue = typeof port === "string" ? Number(port) : Number.NaN;
+    if (!Number.isFinite(numberValue)) {
+      throw new Error(
+        `Invalid multiplexer daemon option websocketPort: ${port}`,
+      );
+    }
+    option.port = numberValue;
+  }
+
+  const roomId = rawArgs.websocketRoomId;
+  if (typeof roomId === "string" && roomId.length > 0) {
+    option.roomId = roomId;
+  }
+
+  return option.port === undefined && option.roomId === undefined
+    ? undefined
+    : option;
+}
+
 function parseCapabilities(value?: string): string[] | undefined {
   if (!value) {
     return undefined;
@@ -332,6 +424,37 @@ function parseCapabilities(value?: string): string[] | undefined {
     .split(",")
     .map((capability) => capability.trim())
     .filter(Boolean);
+}
+
+function parsePhysicalConnectorOption(
+  rawArgs: RawEntryArgs,
+): PhysicalConnectorOption | undefined {
+  const value = rawArgs.physicalConnectorOption;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `Invalid multiplexer daemon option physicalConnectorOption: ${value}`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error: any) {
+    throw new Error(
+      `Invalid multiplexer daemon option physicalConnectorOption: ${error?.message}`,
+    );
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "Invalid multiplexer daemon option physicalConnectorOption: expected object",
+    );
+  }
+
+  return parsed as PhysicalConnectorOption;
 }
 
 if (require.main === module) {

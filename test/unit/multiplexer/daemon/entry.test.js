@@ -209,7 +209,7 @@ describe("multiplexer daemon entry", function () {
     );
   });
 
-  it("creates a control-only daemon with parsed discovery fields", function () {
+  it("creates a host-backed daemon with parsed discovery fields", function () {
     const discoveryPath = path.join(tempDir, "daemon.json");
     const daemonLockPath = path.join(tempDir, "daemon.lock");
     const daemon = createMultiplexerDaemon({
