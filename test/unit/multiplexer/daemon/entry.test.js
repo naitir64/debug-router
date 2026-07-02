@@ -78,8 +78,7 @@ function createOption(tempDir, overrides = {}) {
     controlEndpoint:
       overrides.controlEndpoint ?? path.join(tempDir, "control.sock"),
     protocolVersion: overrides.protocolVersion ?? 1,
-    multiplexerDaemonIdleTimeout:
-      overrides.multiplexerDaemonIdleTimeout ?? -1,
+    multiplexerDaemonIdleTimeout: overrides.multiplexerDaemonIdleTimeout ?? -1,
     ...overrides,
   };
 }
