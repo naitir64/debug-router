@@ -4,7 +4,7 @@
 
 // @ts-ignore
 import { Client as ADBClient, Device } from "@devicefarmer/adbkit";
-import { DebugRouterConnector } from "../../connector";
+import { PhysicalConnector } from "../../physical";
 import { DeviceManager } from "../DeviceManager";
 import AndroidDevice from "./AndroidDevice";
 import { defaultLogger } from "../../utils/logger";
@@ -17,7 +17,7 @@ export class AndroidDeviceManager extends DeviceManager {
   private retryCount: number = 0;
   private readonly adbOptions: any;
   private adbClient: ADBClient | null = null;
-  constructor(driver: DebugRouterConnector, options: any) {
+  constructor(driver: PhysicalConnector, options: any) {
     super(driver);
     this.adbOptions = options;
   }
@@ -104,6 +104,7 @@ export class AndroidDeviceManager extends DeviceManager {
     }
 
     try {
+      await this.registerCurrentDevices();
       this.adbClient
         .trackDevices()
 
@@ -213,6 +214,37 @@ export class AndroidDeviceManager extends DeviceManager {
       });
       this.unregisterAllAndroidDevice();
       this.reWatchAndroidDevices();
+    }
+  }
+
+  private async registerCurrentDevices() {
+    if (!this.adbClient) {
+      return;
+    }
+
+    try {
+      const devices = await this.adbClient.listDevices();
+      for (const device of devices) {
+        if (device.type !== "device") {
+          continue;
+        }
+        if (!this.driver.devices.has(device.id)) {
+          this.driver.traceRecorder?.recordDevicePlug(device.id, {
+            os: "Android",
+            event: "list",
+            deviceType: device.type,
+          });
+        }
+        await this.registerDevice(this.adbClient, device);
+      }
+    } catch (e: any) {
+      const msg = "list android devices error:" + e?.message;
+      defaultLogger.debug(msg);
+      getDriverReportService()?.report("android_connect_error", null, {
+        msg,
+        stage: "device",
+        detail: "listDevices",
+      });
     }
   }
 

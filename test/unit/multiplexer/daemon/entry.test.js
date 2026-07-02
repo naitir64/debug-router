@@ -4,17 +4,28 @@
 
 const assert = require("assert");
 const fs = require("fs");
-const http = require("http");
 const os = require("os");
 const path = require("path");
+const rewire = require(require.resolve("rewire", {
+  paths: [path.join(__dirname, "../../../../debug_router_connector")],
+}));
 
 require("../register_ts");
 
+const entryModule = rewire(
+  path.join(
+    __dirname,
+    "../../../../debug_router_connector/src/multiplexer/daemon/entry"
+  )
+);
 const {
   createMultiplexerDaemon,
   parseEntryOption,
   startMultiplexerDaemonEntry,
-} = require("../../../../debug_router_connector/src/multiplexer/daemon/entry");
+} = entryModule;
+const {
+  MultiplexerHost,
+} = require("../../../../debug_router_connector/src/multiplexer/daemon/MultiplexerHost");
 const {
   defaultLogger,
 } = require("../../../../debug_router_connector/src/utils/logger");
@@ -27,34 +38,75 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-function readHealth(port) {
-  return new Promise((resolve, reject) => {
-    const request = http.get(
-      {
-        host: "127.0.0.1",
-        port,
-        path: "/health",
-      },
-      (response) => {
-        let body = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
-          body += chunk;
-        });
-        response.on("end", () => {
-          try {
-            resolve({
-              statusCode: response.statusCode,
-              body: JSON.parse(body),
-            });
-          } catch (error) {
-            reject(error);
-          }
-        });
-      }
-    );
-    request.on("error", reject);
-  });
+function nextTick() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+class FakeEntryHost {
+  static instances = [];
+  static startError = null;
+
+  constructor(option) {
+    this.option = option;
+    this.startCalls = [];
+    this.stopCalls = 0;
+    FakeEntryHost.instances.push(this);
+  }
+
+  async start(option) {
+    this.startCalls.push(option);
+    if (FakeEntryHost.startError) {
+      throw FakeEntryHost.startError;
+    }
+  }
+
+  async stop() {
+    this.stopCalls++;
+  }
+
+  getControlPort() {
+    return this.option.controlPort > 0 ? this.option.controlPort : 9123;
+  }
+}
+
+class FakeStopFailHost extends FakeEntryHost {
+  async stop() {
+    this.stopCalls++;
+    throw new Error("entry host stop failed");
+  }
+}
+
+function resetFakeEntryHost() {
+  FakeEntryHost.instances = [];
+  FakeEntryHost.startError = null;
+}
+
+function replaceEntryHostCtor(Ctor = FakeEntryHost) {
+  const hostImport = entryModule.__get__("MultiplexerHost_1");
+  const originalHost = hostImport.MultiplexerHost;
+  hostImport.MultiplexerHost = Ctor;
+
+  return () => {
+    hostImport.MultiplexerHost = originalHost;
+  };
+}
+
+function createEntryOption(overrides = {}) {
+  const option = {
+    discoveryPath: overrides.discoveryPath ?? "/tmp/daemon.json",
+    daemonLockPath: overrides.daemonLockPath ?? "/tmp/daemon.lock",
+    protocolVersion: overrides.protocolVersion ?? 1,
+    minSupportedProtocolVersion: overrides.minSupportedProtocolVersion ?? 1,
+    controlPort: overrides.controlPort ?? 0,
+    heartbeatInterval: overrides.heartbeatInterval ?? 100000,
+    daemonVersion: overrides.daemonVersion,
+    capabilities: overrides.capabilities,
+    physicalConnectorOption: overrides.physicalConnectorOption,
+  };
+  if (overrides.legacyDriverDir !== undefined) {
+    option.legacyDriverDir = overrides.legacyDriverDir;
+  }
+  return option;
 }
 
 function stubProcessOnce() {
@@ -94,7 +146,7 @@ describe("multiplexer daemon entry", function () {
         "--daemon-lock-path",
         "/tmp/daemon.lock",
         "--capabilities",
-        "daemon, discovery ,, heartbeat",
+        "control, snapshot ,, routing",
       ]),
       {
         discoveryPath: "/tmp/daemon.json",
@@ -104,7 +156,7 @@ describe("multiplexer daemon entry", function () {
         controlPort: 0,
         heartbeatInterval: 1000,
         daemonVersion: undefined,
-        capabilities: ["daemon", "discovery", "heartbeat"],
+        capabilities: ["control", "snapshot", "routing"],
       }
     );
   });
@@ -130,6 +182,20 @@ describe("multiplexer daemon entry", function () {
         daemonVersion: "1.2.3",
         capabilities: undefined,
       }
+    );
+  });
+
+  it("parses legacy driver dir for daemon-side multi-open ownership", function () {
+    assert.deepStrictEqual(
+      parseEntryOption([
+        "--discovery-path",
+        "/tmp/daemon.json",
+        "--daemon-lock-path",
+        "/tmp/daemon.lock",
+        "--legacy-driver-dir",
+        "/tmp/legacy-driver",
+      ]).legacyDriverDir,
+      "/tmp/legacy-driver"
     );
   });
 
@@ -162,7 +228,71 @@ describe("multiplexer daemon entry", function () {
     );
   });
 
-  it("rejects missing, unknown, positional, and invalid numeric options", function () {
+  it("parses physical connector options from JSON", function () {
+    const parsed = parseEntryOption([
+      "--discovery-path",
+      "/tmp/daemon.json",
+      "--daemon-lock-path",
+      "/tmp/daemon.lock",
+      "--physical-connector-option",
+      JSON.stringify({
+        manualConnect: true,
+        enableAndroid: true,
+        enableIOS: false,
+        enableHarmony: false,
+        adbHostPort: {
+          host: "127.0.0.1",
+          port: 5037,
+        },
+        usbConnectOpt: {
+          retryTime: 5000,
+        },
+      }),
+    ]);
+
+    assert.deepStrictEqual(parsed.physicalConnectorOption, {
+      manualConnect: true,
+      enableAndroid: true,
+      enableIOS: false,
+      enableHarmony: false,
+      adbHostPort: {
+        host: "127.0.0.1",
+        port: 5037,
+      },
+      usbConnectOpt: {
+        retryTime: 5000,
+      },
+    });
+  });
+
+  it("rejects malformed physical connector options", function () {
+    assert.throws(
+      () =>
+        parseEntryOption([
+          "--discovery-path",
+          "/tmp/daemon.json",
+          "--daemon-lock-path",
+          "/tmp/daemon.lock",
+          "--physical-connector-option",
+          "{bad-json",
+        ]),
+      /Invalid multiplexer daemon option physicalConnectorOption/
+    );
+    assert.throws(
+      () =>
+        parseEntryOption([
+          "--discovery-path",
+          "/tmp/daemon.json",
+          "--daemon-lock-path",
+          "/tmp/daemon.lock",
+          "--physical-connector-option",
+          "[]",
+        ]),
+      /expected object/
+    );
+  });
+
+  it("rejects missing required options", function () {
     assert.throws(
       () => parseEntryOption(["--discovery-path", "/tmp/daemon.json"]),
       /Missing required multiplexer daemon option: daemonLockPath/
@@ -171,6 +301,9 @@ describe("multiplexer daemon entry", function () {
       () => parseEntryOption(["--daemon-lock-path", "/tmp/daemon.lock"]),
       /Missing required multiplexer daemon option: discoveryPath/
     );
+  });
+
+  it("rejects unknown, positional, and valueless numeric options", function () {
     assert.throws(
       () =>
         parseEntryOption([
@@ -198,6 +331,15 @@ describe("multiplexer daemon entry", function () {
     assert.throws(
       () =>
         parseEntryOption([
+          "--discovery-path=",
+          "--daemon-lock-path",
+          "/tmp/daemon.lock",
+        ]),
+      /Missing required multiplexer daemon option: discoveryPath/
+    );
+    assert.throws(
+      () =>
+        parseEntryOption([
           "--discovery-path",
           "/tmp/daemon.json",
           "--daemon-lock-path",
@@ -209,7 +351,7 @@ describe("multiplexer daemon entry", function () {
     );
   });
 
-  it("creates a host-backed daemon with parsed discovery fields", function () {
+  it("creates a daemon with entry host discovery fields", function () {
     const discoveryPath = path.join(tempDir, "daemon.json");
     const daemonLockPath = path.join(tempDir, "daemon.lock");
     const daemon = createMultiplexerDaemon({
@@ -220,20 +362,149 @@ describe("multiplexer daemon entry", function () {
       controlPort: 9333,
       heartbeatInterval: 100000,
       daemonVersion: "0.0.3",
-      capabilities: ["daemon", "control"],
+      capabilities: ["control", "snapshot"],
     });
 
     const info = daemon.createDiscoveryInfo();
+    assert.ok(daemon.host instanceof MultiplexerHost);
     assert.strictEqual(info.controlPort, 9333);
     assert.strictEqual(info.protocolVersion, 3);
     assert.strictEqual(info.minSupportedProtocolVersion, 2);
     assert.strictEqual(info.daemonVersion, "0.0.3");
-    assert.deepStrictEqual(info.capabilities, ["daemon", "control"]);
+    assert.deepStrictEqual(info.capabilities, ["control", "snapshot"]);
+    assert.deepStrictEqual(daemon.host.option, {
+      controlPort: 9333,
+      protocolVersion: 3,
+      minSupportedProtocolVersion: 2,
+      daemonVersion: "0.0.3",
+      capabilities: ["control", "snapshot"],
+    });
     assert.strictEqual(fs.existsSync(discoveryPath), false);
   });
 
-  it("starts a daemon entry, writes discovery with health, and registers cleanup handlers", async function () {
-    const processStub = stubProcessOnce();
+  it("creates MultiplexerHost with optional metadata omitted when not provided", function () {
+    const discoveryPath = path.join(tempDir, "daemon.json");
+    const daemonLockPath = path.join(tempDir, "daemon.lock");
+    const daemon = createMultiplexerDaemon({
+      discoveryPath,
+      daemonLockPath,
+      protocolVersion: 1,
+      minSupportedProtocolVersion: 1,
+      controlPort: 9001,
+      heartbeatInterval: 100000,
+    });
+
+    assert.ok(daemon.host instanceof MultiplexerHost);
+    assert.deepStrictEqual(daemon.host.option, {
+      controlPort: 9001,
+      protocolVersion: 1,
+      minSupportedProtocolVersion: 1,
+      daemonVersion: undefined,
+      capabilities: undefined,
+    });
+  });
+
+  it("forwards parsed entry options into the constructed host", function () {
+    resetFakeEntryHost();
+    const restoreHost = replaceEntryHostCtor();
+    const discoveryPath = path.join(tempDir, "daemon.json");
+    const daemonLockPath = path.join(tempDir, "daemon.lock");
+
+    try {
+      createMultiplexerDaemon(
+        createEntryOption({
+          discoveryPath,
+          daemonLockPath,
+          protocolVersion: 4,
+          minSupportedProtocolVersion: 2,
+          controlPort: 9444,
+          daemonVersion: "0.0.4",
+          capabilities: ["control", "routing"],
+          legacyDriverDir: "/tmp/legacy-driver",
+          physicalConnectorOption: {
+            manualConnect: true,
+            enableAndroid: true,
+            enableIOS: false,
+            enableHarmony: false,
+            enableNetworkDevice: false,
+            usbConnectOpt: {
+              retryTime: 5000,
+            },
+          },
+        })
+      );
+
+      assert.strictEqual(FakeEntryHost.instances.length, 1);
+      assert.deepStrictEqual(FakeEntryHost.instances[0].option, {
+        controlPort: 9444,
+        protocolVersion: 4,
+        minSupportedProtocolVersion: 2,
+        daemonVersion: "0.0.4",
+        capabilities: ["control", "routing"],
+        legacyDriverDir: "/tmp/legacy-driver",
+        manualConnect: true,
+        enableAndroid: true,
+        enableIOS: false,
+        enableHarmony: false,
+        enableNetworkDevice: false,
+        usbConnectOpt: {
+          retryTime: 5000,
+        },
+      });
+    } finally {
+      restoreHost();
+    }
+  });
+
+  it("starts a daemon with the entry-created host and writes discovery from the host port", async function () {
+    resetFakeEntryHost();
+    const restoreHost = replaceEntryHostCtor();
+    const discoveryPath = path.join(tempDir, "daemon.json");
+    const daemonLockPath = path.join(tempDir, "daemon.lock");
+    let daemon;
+
+    try {
+      daemon = createMultiplexerDaemon(
+        createEntryOption({
+          discoveryPath,
+          daemonLockPath,
+          controlPort: 0,
+          daemonVersion: "0.0.5",
+          capabilities: ["control"],
+        })
+      );
+
+      await daemon.start();
+
+      assert.strictEqual(FakeEntryHost.instances.length, 1);
+      assert.deepStrictEqual(FakeEntryHost.instances[0].startCalls, [
+        undefined,
+      ]);
+      assert.deepStrictEqual(readJson(discoveryPath), {
+        pid: process.pid,
+        protocolVersion: 1,
+        minSupportedProtocolVersion: 1,
+        controlPort: 9123,
+        heartbeat: readJson(discoveryPath).heartbeat,
+        startedAt: readJson(discoveryPath).startedAt,
+        daemonVersion: "0.0.5",
+        capabilities: ["control"],
+      });
+
+      await daemon.stop();
+      assert.strictEqual(FakeEntryHost.instances[0].stopCalls, 1);
+    } finally {
+      if (daemon) {
+        await daemon.stop().catch(() => {});
+      }
+      restoreHost();
+    }
+  });
+
+  it("startMultiplexerDaemonEntry parses args, registers cleanup handlers, and starts the host", async function () {
+    resetFakeEntryHost();
+    const restoreHost = replaceEntryHostCtor();
+    const processOnce = stubProcessOnce();
     const discoveryPath = path.join(tempDir, "daemon.json");
     const daemonLockPath = path.join(tempDir, "daemon.lock");
     let daemon;
@@ -245,34 +516,23 @@ describe("multiplexer daemon entry", function () {
         "--daemon-lock-path",
         daemonLockPath,
         "--control-port",
-        "0",
-        "--heartbeat-interval",
-        "100000",
+        "9555",
         "--daemon-version",
-        "0.0.1",
+        "0.0.6",
         "--capabilities",
-        "daemon,control",
+        "control,snapshot",
       ]);
 
-      const discovery = readJson(discoveryPath);
-      assert.strictEqual(discovery.pid, process.pid);
-      assert.strictEqual(discovery.protocolVersion, 1);
-      assert.strictEqual(discovery.minSupportedProtocolVersion, 1);
-      assert.strictEqual(Number.isInteger(discovery.controlPort), true);
-      assert.notStrictEqual(discovery.controlPort, 0);
-      assert.strictEqual(discovery.daemonVersion, "0.0.1");
-      assert.deepStrictEqual(discovery.capabilities, ["daemon", "control"]);
-
-      const health = await readHealth(discovery.controlPort);
-      assert.strictEqual(health.statusCode, 200);
-      assert.strictEqual(health.body.ok, true);
-      assert.strictEqual(health.body.pid, process.pid);
-      assert.strictEqual(health.body.protocolVersion, 1);
-      assert.strictEqual(health.body.minSupportedProtocolVersion, 1);
-      assert.strictEqual(health.body.daemonVersion, "0.0.1");
-      assert.deepStrictEqual(health.body.capabilities, ["daemon", "control"]);
+      assert.strictEqual(FakeEntryHost.instances.length, 1);
+      assert.deepStrictEqual(FakeEntryHost.instances[0].option, {
+        controlPort: 9555,
+        protocolVersion: 1,
+        minSupportedProtocolVersion: 1,
+        daemonVersion: "0.0.6",
+        capabilities: ["control", "snapshot"],
+      });
       assert.deepStrictEqual(
-        processStub.registrations.map((registration) => registration.event),
+        processOnce.registrations.map((item) => item.event),
         [
           "beforeExit",
           "SIGINT",
@@ -281,14 +541,124 @@ describe("multiplexer daemon entry", function () {
           "unhandledRejection",
         ]
       );
+      assert.deepStrictEqual(FakeEntryHost.instances[0].startCalls, [
+        undefined,
+      ]);
+      assert.strictEqual(readJson(discoveryPath).controlPort, 9555);
     } finally {
-      processStub.restore();
       if (daemon) {
-        await daemon.stop();
+        await daemon.stop().catch(() => {});
       }
+      processOnce.restore();
+      restoreHost();
     }
+  });
 
-    assert.strictEqual(fs.existsSync(discoveryPath), false);
-    assert.strictEqual(fs.existsSync(daemonLockPath), false);
+  it("startMultiplexerDaemonEntry still registers cleanup before propagating host start failures", async function () {
+    resetFakeEntryHost();
+    FakeEntryHost.startError = new Error("entry host failed");
+    const restoreHost = replaceEntryHostCtor();
+    const processOnce = stubProcessOnce();
+    const discoveryPath = path.join(tempDir, "daemon.json");
+    const daemonLockPath = path.join(tempDir, "daemon.lock");
+
+    try {
+      await assert.rejects(
+        () =>
+          startMultiplexerDaemonEntry([
+            "--discovery-path",
+            discoveryPath,
+            "--daemon-lock-path",
+            daemonLockPath,
+          ]),
+        /entry host failed/
+      );
+
+      assert.strictEqual(FakeEntryHost.instances.length, 1);
+      assert.deepStrictEqual(FakeEntryHost.instances[0].startCalls, [
+        undefined,
+      ]);
+      assert.strictEqual(FakeEntryHost.instances[0].stopCalls, 0);
+      assert.deepStrictEqual(
+        processOnce.registrations.map((item) => item.event),
+        [
+          "beforeExit",
+          "SIGINT",
+          "SIGTERM",
+          "uncaughtException",
+          "unhandledRejection",
+        ]
+      );
+      assert.strictEqual(fs.existsSync(discoveryPath), false);
+      assert.strictEqual(fs.existsSync(daemonLockPath), false);
+    } finally {
+      processOnce.restore();
+      restoreHost();
+      resetFakeEntryHost();
+    }
+  });
+
+  it("runs process cleanup once when beforeExit is emitted repeatedly", async function () {
+    resetFakeEntryHost();
+    const restoreHost = replaceEntryHostCtor();
+    const processOnce = stubProcessOnce();
+    const discoveryPath = path.join(tempDir, "daemon.json");
+    const daemonLockPath = path.join(tempDir, "daemon.lock");
+
+    try {
+      await startMultiplexerDaemonEntry([
+        "--discovery-path",
+        discoveryPath,
+        "--daemon-lock-path",
+        daemonLockPath,
+      ]);
+
+      const beforeExit = processOnce.registrations.find(
+        (item) => item.event === "beforeExit"
+      );
+      beforeExit.handler();
+      beforeExit.handler();
+      await nextTick();
+
+      assert.strictEqual(FakeEntryHost.instances[0].stopCalls, 1);
+      assert.strictEqual(fs.existsSync(discoveryPath), false);
+    } finally {
+      processOnce.restore();
+      restoreHost();
+      resetFakeEntryHost();
+    }
+  });
+
+  it("marks a clean exit as failed when cleanup throws", async function () {
+    resetFakeEntryHost();
+    const restoreHost = replaceEntryHostCtor(FakeStopFailHost);
+    const processOnce = stubProcessOnce();
+    const originalExitCode = process.exitCode;
+    const discoveryPath = path.join(tempDir, "daemon.json");
+    const daemonLockPath = path.join(tempDir, "daemon.lock");
+
+    try {
+      process.exitCode = 0;
+      await startMultiplexerDaemonEntry([
+        "--discovery-path",
+        discoveryPath,
+        "--daemon-lock-path",
+        daemonLockPath,
+      ]);
+
+      const beforeExit = processOnce.registrations.find(
+        (item) => item.event === "beforeExit"
+      );
+      beforeExit.handler();
+      await nextTick();
+
+      assert.strictEqual(FakeEntryHost.instances[0].stopCalls, 1);
+      assert.strictEqual(process.exitCode, 1);
+    } finally {
+      process.exitCode = originalExitCode;
+      processOnce.restore();
+      restoreHost();
+      resetFakeEntryHost();
+    }
   });
 });

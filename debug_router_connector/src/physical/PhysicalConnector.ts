@@ -20,7 +20,6 @@ import {
   setDriverReportService,
 } from "../report/interface/DriverReportService";
 import { PhysicalConnectorEvent } from "../utils/type";
-import type { DebugRouterConnector } from "../connector/DebugRouterConnector";
 import {
   monitorUnregisterClient,
   monitorUnregisterDevice,
@@ -142,30 +141,23 @@ export class PhysicalConnector {
     this.setOptionByEnv();
     this.traceRecorder = option.traceRecorder ?? null;
     this.devicesManager = new Set<DeviceManager>();
-    // Keep the legacy device/USB types untouched until the public connector
-    // switches to the mux path; PhysicalConnector matches the needed runtime API.
-    const legacyDriver = this as unknown as DebugRouterConnector;
     if (this.enableAndroid) {
-      this.devicesManager.add(
-        new AndroidDeviceManager(legacyDriver, this.adbOption),
-      );
+      this.devicesManager.add(new AndroidDeviceManager(this, this.adbOption));
     }
     if (this.enableIOS) {
-      this.devicesManager.add(new iOSDeviceManager(legacyDriver));
+      this.devicesManager.add(new iOSDeviceManager(this));
     }
     if (this.enableHarmony) {
-      this.devicesManager.add(
-        new HarmonyDeviceManager(legacyDriver, this.hdcOption),
-      );
+      this.devicesManager.add(new HarmonyDeviceManager(this, this.hdcOption));
     }
     if (this.enableDesktop) {
-      this.devicesManager.add(new DesktopDeviceManager(legacyDriver));
+      this.devicesManager.add(new DesktopDeviceManager(this));
     }
     if (this.enableNetworkDevice && this.networkDeviceOpt) {
       if (this.networkDeviceOpt) {
         // NetWorkDevices use ip as their serial.
         this.devicesManager.add(
-          new NetworkDeviceManager(legacyDriver, this.networkDeviceOpt),
+          new NetworkDeviceManager(this, this.networkDeviceOpt),
         );
       } else {
         getDriverReportService()?.report("network_connect_error", null, {
@@ -176,7 +168,7 @@ export class PhysicalConnector {
       }
     }
   }
-
+  
   async startWatchClient(
     device: BaseDevice,
     shouldStart: () => boolean = () => true,
@@ -543,12 +535,12 @@ export class PhysicalConnector {
     return new Promise((resolve) => {
       if (!this.devices.has(deviceId)) {
         resolve([]);
-        return;
+        return; 
       }
       const currentClients = this.findUsbClientsByDeviceId(deviceId);
       if (timeout < 0 || currentClients.length > 0) {
         resolve(currentClients);
-        return;
+        return; 
       }
 
       const handle = (client: UsbClient) => {

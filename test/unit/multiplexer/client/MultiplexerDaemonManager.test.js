@@ -154,6 +154,8 @@ function createManager(tempDir, overrides = {}) {
     minSupportedProtocolVersion: overrides.minSupportedProtocolVersion,
     daemonVersion: overrides.daemonVersion,
     capabilities: overrides.capabilities,
+    legacyDriverDir: overrides.legacyDriverDir,
+    physicalConnectorOption: overrides.physicalConnectorOption,
     readyPollInterval: overrides.readyPollInterval ?? 10,
     replacementTimeout: overrides.replacementTimeout ?? 20,
     spawn: spawnRecorder.spawn,
@@ -274,6 +276,7 @@ describe("MultiplexerDaemonManager", function () {
       heartbeatInterval: 250,
       daemonVersion: "0.0.1",
       capabilities: ["daemon", "manager"],
+      legacyDriverDir: "/tmp/legacy-driver",
     });
 
     assert.deepStrictEqual(await manager.ensureDaemon(), readyInfo);
@@ -297,6 +300,8 @@ describe("MultiplexerDaemonManager", function () {
       "0.0.1",
       "--capabilities",
       "daemon,manager",
+      "--legacy-driver-dir",
+      "/tmp/legacy-driver",
     ]);
     assert.deepStrictEqual(spawnRecorder.calls[0].options, {
       detached: true,
@@ -304,6 +309,43 @@ describe("MultiplexerDaemonManager", function () {
     });
     assert.strictEqual(spawnRecorder.calls[0].unrefCalled, true);
     assert.strictEqual(fs.existsSync(spawnLockPath), false);
+  });
+
+  it("passes serialized physical connector options to the daemon entry", async function () {
+    const readyInfo = createInfo({ pid: 203 });
+    const discovery = createSequenceDiscovery(
+      path.join(tempDir, "daemon.json"),
+      [unusable("missing"), unusable("missing"), usable(readyInfo)]
+    );
+    const physicalConnectorOption = {
+      manualConnect: true,
+      enableAndroid: true,
+      enableIOS: false,
+      enableHarmony: false,
+      enableDesktop: false,
+      enableNetworkDevice: false,
+      adbHostPort: {
+        host: "127.0.0.1",
+        port: 5037,
+      },
+      usbConnectOpt: {
+        retryTime: 5000,
+      },
+    };
+    const { manager, spawnRecorder } = createManager(tempDir, {
+      discovery,
+      physicalConnectorOption,
+    });
+
+    assert.deepStrictEqual(await manager.ensureDaemon(), readyInfo);
+    assert.strictEqual(spawnRecorder.calls.length, 1);
+    const args = spawnRecorder.calls[0].args;
+    const optionIndex = args.indexOf("--physical-connector-option");
+    assert.notStrictEqual(optionIndex, -1);
+    assert.deepStrictEqual(
+      JSON.parse(args[optionIndex + 1]),
+      physicalConnectorOption
+    );
   });
 
   it("waits for an in-flight spawn when spawn lock is held elsewhere", async function () {
