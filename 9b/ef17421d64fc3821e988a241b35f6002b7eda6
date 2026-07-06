@@ -1,0 +1,26 @@
+test/unit/multiplexer/client/MultiplexerDaemonManager.test.js
+  s_342240f81b38da::t_ad174f33a551ae 310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "9bef17421d64fc3821e988a241b35f6002b7eda6",
+  "prompts": {},
+  "humans": {
+    "h_8d09519521afb0": {
+      "author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "sessions": {
+    "s_342240f81b38da": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-e10d5b57-ce62-4ba7-81fe-2aa6200cdcad",
+        "model": "default"
+      },
+      "human_author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
