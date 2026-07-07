@@ -1,0 +1,41 @@
+debug_router_connector/src/multiplexer/utils/FileLock.ts
+  s_2f41c647905dba::t_996bc9bf3eb0d7 142,144,146-147
+  h_8d09519521afb0 7,12,15-18,21-23,26-27,29-30,38,42-43,60-67,69-73,92-93,95-99,109,112-113,115,132-133,137-138,143,145,149,152,156-157,162-163,169,188-231
+debug_router_connector/src/multiplexer/client/MultiplexerDaemonManager.ts
+  s_ee4617400a0694::t_857cc614c49e45 379
+  h_8d09519521afb0 35,183-186,203,322-324,349,351-356,358-362,364-367,369-370,375,389,425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "78e5bd99b31370f54d6b4a700f716917d2404f2e",
+  "prompts": {},
+  "humans": {
+    "h_44c187919d7c32": {
+      "author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    },
+    "h_8d09519521afb0": {
+      "author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "sessions": {
+    "s_2f41c647905dba": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-91d78fd5-3527-4e72-8389-4720bcb8b443",
+        "model": "default"
+      },
+      "human_author": "Huhao <huhao.64@bytedance.com>"
+    },
+    "s_ee4617400a0694": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-e2a08102-62e9-41eb-8db8-f5d254e3e93b",
+        "model": "default"
+      },
+      "human_author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
