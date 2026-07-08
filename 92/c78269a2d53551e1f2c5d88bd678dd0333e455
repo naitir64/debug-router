@@ -1,0 +1,76 @@
+debug_router_connector/src/multiplexer/utils/FileLock.ts
+  s_01b3700fe50ba7::t_a02e3d2e729c11 12
+  s_ebfa37c0c3a7dd::t_4981f75f809a12 25
+  s_5c934a2f8ea31f::t_613269581f6ab3 154-155,160-161
+  s_a04fbf12f44144::t_639e1d60e7eb34 128
+  h_44c187919d7c32 134-136,146,156
+  s_e471f1732f9586::t_2024151e405517 23-24
+debug_router_connector/src/multiplexer/protocol/discovery.ts
+  s_fab6b43b07e2ec::t_69a2ffc3668b85 10-11
+  h_44c187919d7c32 12
+debug_router_connector/src/multiplexer/utils/paths.ts
+  h_44c187919d7c32 10-11,17,19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "92c78269a2d53551e1f2c5d88bd678dd0333e455",
+  "prompts": {},
+  "humans": {
+    "h_44c187919d7c32": {
+      "author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_01b3700fe50ba7": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-ad0ed39c-7986-46eb-9f0e-893c33610e05",
+        "model": "default"
+      },
+      "human_author": null
+    },
+    "s_5c934a2f8ea31f": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a450c676c37872e0897537c",
+        "model": "gpt-5.4__dev"
+      },
+      "human_author": null
+    },
+    "s_a04fbf12f44144": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-d4da1ecf-64cb-4817-a998-802b5350d696",
+        "model": "default"
+      },
+      "human_author": null
+    },
+    "s_e471f1732f9586": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-106df515-031b-4b6b-aaaa-87d8adfe0314",
+        "model": "default"
+      },
+      "human_author": null
+    },
+    "s_ebfa37c0c3a7dd": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-9a3907af-1667-4c7f-abbf-e4654a1048bf",
+        "model": "default"
+      },
+      "human_author": null
+    },
+    "s_fab6b43b07e2ec": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-341e3853-b008-43d6-aef3-ce97645e47d5",
+        "model": "default"
+      },
+      "human_author": null
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
