@@ -1,0 +1,64 @@
+debug_router_connector/src/multiplexer/protocol/control.ts
+  h_44c187919d7c32 8-11
+debug_router_connector/src/multiplexer/utils/atomic_file.ts
+  s_5952aa64e60a5f::t_c08222b11f290c 24
+  h_44c187919d7c32 25-26 gitai:{"mixed_line_ranges":[{"Range":[25,26]}],"operations":[]}
+debug_router_connector/src/multiplexer/protocol/discovery.ts
+  s_55ec94a48c8193::t_c38d0d0083f396 12
+debug_router_connector/src/multiplexer/protocol/snapshot.ts
+  h_44c187919d7c32 7-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e173214027ebb48fb37a46315ce1d114db6423b1",
+  "prompts": {},
+  "humans": {
+    "h_44c187919d7c32": {
+      "author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_55ec94a48c8193": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-3170796e-60ad-441d-9a42-9746300d36d9",
+        "model": "default"
+      },
+      "human_author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    },
+    "s_5952aa64e60a5f": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-c49d2021-b7c9-4568-9c1c-2bfd8405a13c",
+        "model": "default"
+      },
+      "human_author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {
+    "debug_router_connector/src/multiplexer/utils/atomic_file.ts": [
+      {
+        "hash": "h_44c187919d7c32",
+        "line_ranges": [
+          {
+            "Range": [
+              25,
+              26
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Range": [
+              25,
+              26
+            ]
+          }
+        ],
+        "operations": []
+      }
+    ]
+  },
+  "remote_transcripts": {}
+}
