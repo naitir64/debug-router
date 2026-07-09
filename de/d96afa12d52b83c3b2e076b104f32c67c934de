@@ -1,0 +1,11 @@
+debug_router_connector/src/multiplexer/protocol/snapshot.ts
+  h_44c187919d7c32 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "ded96afa12d52b83c3b2e076b104f32c67c934de",
+  "prompts": {},
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
