@@ -1,0 +1,16 @@
+test/e2e_test/connector_test/websocket.js
+  h_8d09519521afb0 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "04afabdae51eee6e8c05e56317c6a7e7a896961f",
+  "prompts": {},
+  "humans": {
+    "h_8d09519521afb0": {
+      "author": "Huhao <huhao.64@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
