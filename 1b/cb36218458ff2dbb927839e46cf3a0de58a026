@@ -1,0 +1,18 @@
+debug_router_connector/src/connector/DebugRouterConnector.ts
+  h_44c187919d7c32 36,81,85,464,470,474,522,568-574,640,653-658,695-697,701-703,707-710,713-715,721-724,727-729,776-786,790-793,798-895,897-903,1098-1117,1131
+debug_router_connector/src/multiplexer/daemon/MultiplexerHost.ts
+  h_44c187919d7c32 16,20,34,48-51,86-87,92-94,124,223-225,253-256,260-263,291-293,332-337,350-351,358,376-378,400-413,437-438,450-452,493,549-606,614-632,657-670,744,746,750,752-760,765-770,772,1101,1106-1113,1115-1128,1130,1132-1134,1136-1141,1223-1249,1252-1254,1302-1315,1516-1518,1609-1610
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "1bcb36218458ff2dbb927839e46cf3a0de58a026",
+  "prompts": {},
+  "humans": {
+    "h_44c187919d7c32": {
+      "author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
