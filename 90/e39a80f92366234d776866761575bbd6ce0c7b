@@ -1,0 +1,18 @@
+debug_router_connector/src/multiplexer/client/MultiplexerDaemonManager.ts
+  h_44c187919d7c32 42,176-177,367
+debug_router_connector/src/connector/DebugRouterConnector.ts
+  h_44c187919d7c32 17,48-68,70,100-105,115,132-144,147,175-181,184-188,212-213,216-217,234,240-245,371-384,512-514,721,752-754,766-770,779,828-832,834,862-870,1013-1014,1032-1068,1071-1072,1242,1265-1283
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "90e39a80f92366234d776866761575bbd6ce0c7b",
+  "prompts": {},
+  "humans": {
+    "h_44c187919d7c32": {
+      "author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
