@@ -1,0 +1,16 @@
+debug_router_connector/src/multiplexer/daemon/MultiplexerHost.ts
+  h_44c187919d7c32 23,61,524-526,531,781-783,1239-1250,1286-1290,1294-1295,1566-1570,1877-1895
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "0d62379defff210a7dcf9487daab91cdbad1e8a1",
+  "prompts": {},
+  "humans": {
+    "h_44c187919d7c32": {
+      "author": "Huhao <97864359+naitir64@users.noreply.github.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
