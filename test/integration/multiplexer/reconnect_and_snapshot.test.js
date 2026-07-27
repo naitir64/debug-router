@@ -69,7 +69,7 @@ describe("multiplexer integration reconnect and snapshot", function () {
       () => context.discovery.getReusableDiscovery(),
       3000,
     );
-    const pending = client.call("sendRawMessage", {
+    const pending = client.call("sendMessageWithReply", {
       clientId: 1,
       message: {
         event: "Customized",

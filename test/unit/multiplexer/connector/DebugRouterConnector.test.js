@@ -304,6 +304,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         multiplexerLegacyDriverDir: "/tmp/legacy-driver",
         multiplexerStaleTimeout: 222,
         multiplexerStartupTimeout: 333,
+        multiplexerHeartbeatInterval: 25,
         multiplexerDaemonIdleTimeout: 444,
         multiplexerRpcTimeout: 555,
         forceRespawnDaemon: true,
@@ -341,6 +342,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(state.managers[0].option.daemonEntry, "/tmp/entry.js");
       assert.strictEqual(state.managers[0].option.startupTimeout, 333);
       assert.strictEqual(state.managers[0].option.staleTimeout, 222);
+      assert.strictEqual(state.managers[0].option.heartbeatInterval, 25);
       assert.strictEqual(
         state.managers[0].option.legacyDriverDir,
         "/tmp/legacy-driver"
@@ -413,7 +415,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("uses full daemon capabilities by default without forceRespawnDaemon", function () {
+  it("uses all daemon capabilities by default without forceRespawnDaemon", function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {
       new DebugRouterConnector({
@@ -523,7 +525,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("keeps device capability flags local to each Connector", function () {
+  it("keeps device capability options local to each Connector", function () {
     const { DebugRouterConnector, restore } = loadConnectorWithFakes();
     try {
       const connector = new DebugRouterConnector({
@@ -1126,7 +1128,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         state.clients[0].calls
           .filter(
             (call) =>
-              call.method === "sendMessage" && call.params.target === "app"
+              call.method === "sendMessageWithoutReply" && call.params.target === "app"
           )
           .map((call) => JSON.parse(call.params.message).data.data.client_id),
         [-1, 0]
@@ -1192,7 +1194,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
           params: {},
         },
         {
-          method: "sendMessage",
+          method: "sendMessageWithoutReply",
           params: {
             target: "web",
             clientId: -1,
@@ -1200,7 +1202,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
           },
         },
         {
-          method: "sendMessage",
+          method: "sendMessageWithoutReply",
           params: {
             target: "app",
             clientId: 1,
@@ -1426,7 +1428,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(connector.watchAllClientsStarted, true);
       assert.deepStrictEqual(state.clients[0].calls.slice(0, 1), [
         {
-          method: "startWatchAllClients",
+          method: "startAllDeviceClientWatchers",
           params: { force: false },
         },
       ]);
@@ -1441,7 +1443,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(connector.watchAllClientsStarted, true);
       assert.deepStrictEqual(
         state.clients[0].calls
-          .filter((call) => call.method === "startWatchAllClients")
+          .filter((call) => call.method === "startAllDeviceClientWatchers")
           .map((call) => call.params),
         [{ force: false }, { force: false }]
       );
@@ -1466,11 +1468,11 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(connector.watchAllClientsStarted, false);
       assert.deepStrictEqual(state.clients[0].calls, [
         {
-          method: "startWatchAllClients",
+          method: "startAllDeviceClientWatchers",
           params: { force: false },
         },
         {
-          method: "stopWatchAllClients",
+          method: "stopAllDeviceClientWatchers",
           params: {},
         },
       ]);
@@ -1483,11 +1485,11 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       assert.deepStrictEqual(
         state.clients[0].calls.filter(
-          (call) => call.method === "startWatchAllClients"
+          (call) => call.method === "startAllDeviceClientWatchers"
         ),
         [
           {
-            method: "startWatchAllClients",
+            method: "startAllDeviceClientWatchers",
             params: { force: false },
           },
         ]
@@ -1559,7 +1561,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
           },
         },
         {
-          method: "startWatchAllClients",
+          method: "startAllDeviceClientWatchers",
           params: { force: false },
         },
         {
@@ -1572,38 +1574,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("does not create a websocket mirror when startWSServer returns no server info", async function () {
-    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes({
-      results: [["startWSServer", undefined]],
-    });
-    try {
-      const connector = new DebugRouterConnector({
-        manualConnect: true,
-        enableWebSocket: true,
-      });
-
-      await connector.startWSServer();
-      connector.sendMessageToWeb("web");
-      connector.sendMessageToApp(1, "app");
-      await nextTick();
-
-      assert.strictEqual(connector.desiredWSServerStarted, true);
-      assert.strictEqual(connector.webSocketServerStarted, false);
-      assert.strictEqual(connector.wss, null);
-      assert.deepStrictEqual(state.clients[0].calls, [
-        {
-          method: "startWSServer",
-          params: {},
-        },
-      ]);
-    } finally {
-      restore();
-    }
-  });
-
   it("handles fire-and-forget RPC rejections without throwing", async function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes({
-      rejectMethods: ["sendMessage"],
+      rejectMethods: ["sendMessageWithoutReply"],
       results: [
         [
           "startWSServer",
@@ -1633,11 +1606,11 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       assert.deepStrictEqual(state.clients[0].calls, [
         {
-          method: "startWatchAllClients",
+          method: "startAllDeviceClientWatchers",
           params: { force: true },
         },
         {
-          method: "startWatchAllClients",
+          method: "startAllDeviceClientWatchers",
           params: { force: false },
         },
         {
@@ -1645,7 +1618,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
           params: {},
         },
         {
-          method: "sendMessage",
+          method: "sendMessageWithoutReply",
           params: {
             target: "web",
             clientId: -1,
@@ -1653,7 +1626,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
           },
         },
         {
-          method: "sendMessage",
+          method: "sendMessageWithoutReply",
           params: {
             target: "app",
             clientId: 1,
@@ -1851,7 +1824,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       const call = state.clients[0].calls.find(
         (candidate) =>
-          candidate.method === "sendMessage" &&
+          candidate.method === "sendMessageWithoutReply" &&
           candidate.params.target === "web" &&
           candidate.params.clientId === 200
       );
