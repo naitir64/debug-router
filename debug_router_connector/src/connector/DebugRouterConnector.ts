@@ -896,56 +896,12 @@ export class DebugRouterConnector {
     const client = MultiplexerWebSocketClient.fromSnapshot(
       snapshot,
       this.daemonClient,
-      () => this.sendClientListToWebSocketClient(snapshot.id),
     );
     this.websocketWebClients.set(snapshot.id, client);
     if (emitConnected) {
       this.emit("websocket-web-client-connected", client as any);
     }
     return client;
-  }
-
-  private sendClientListToWebSocketClient(webClientId: number): void {
-    const webClient = this.websocketWebClients.get(webClientId);
-    if (!webClient || webClient.type() !== "Driver") {
-      return;
-    }
-
-    const data: Array<{
-      id: number;
-      type: string;
-      info: Record<string, unknown>;
-    }> = [];
-    for (const client of this.websocketAppClients.values()) {
-      data.push({
-        id: client.clientId(),
-        type: client.info.type,
-        info: {
-          ...(client.info.raw_info as Record<string, unknown>),
-          network: "WiFi",
-        },
-      });
-    }
-    for (const client of this.usbClients.values()) {
-      data.push({
-        id: client.clientId(),
-        type: "runtime",
-        info: {
-          ...(client.info.query.raw_info as Record<string, unknown>),
-          deviceName: client.info.query.device,
-          osType: client.info.query.os,
-          deviceModel: client.info.query.device_model,
-          network: "USB",
-        },
-      });
-    }
-
-    webClient.sendMessage(
-      JSON.stringify({
-        event: "ClientList",
-        data,
-      }),
-    );
   }
 
   private upsertDeviceSnapshots(

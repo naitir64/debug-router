@@ -1767,56 +1767,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("preserves legacy Driver handleListClients behavior through the websocket proxy", async function () {
-    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
-    try {
-      const connector = new DebugRouterConnector({
-        manualConnect: true,
-        enableWebSocket: true,
-      });
-      connector.webSocketServerStarted = true;
-      connector.applySnapshot({
-        protocolVersion: 1,
-        generatedAt: 1,
-        devices: [createDeviceSnapshot()],
-        clients: [createClientSnapshot()],
-        websocketAppClients: [
-          createWebSocketSnapshot({ id: 100, app: "wifi-app" }),
-        ],
-        websocketWebClients: [
-          createWebSocketSnapshot({ id: 200, type: "Driver" }),
-        ],
-      });
-
-      connector.websocketWebClients.get(200).handleListClients();
-      await nextTick();
-
-      const call = state.clients[0].calls.find(
-        (candidate) =>
-          candidate.method === "sendMessageWithoutReply" &&
-          candidate.params.target === "web" &&
-          candidate.params.clientId === 200
-      );
-      assert(call);
-      assert.strictEqual(call.params.clientId, 200);
-      const message = JSON.parse(call.params.message);
-      assert.strictEqual(message.event, "ClientList");
-      assert.deepStrictEqual(
-        message.data.map((client) => [
-          client.id,
-          client.type,
-          client.info.network,
-        ]),
-        [
-          [100, "runtime", "WiFi"],
-          [1, "runtime", "USB"],
-        ]
-      );
-    } finally {
-      restore();
-    }
-  });
-
   it("keeps websocket clients out of getAllAppClients when websocket support is disabled", function () {
     const { DebugRouterConnector, restore } = loadConnectorWithFakes();
     try {

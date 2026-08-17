@@ -3,45 +3,37 @@
 // LICENSE file in the root directory of this source tree.
 
 import { Client } from "../../connector/Client";
-import {
-  CustomizedEventType,
-  RequireMessageType,
-  SocketEvent,
-  isCustomizedEventType,
-} from "../../utils/type";
-import { WebSocketClient } from "../../websocket/WebSocketConnection";
+import { defaultLogger } from "../../utils/logger";
+import { RequireMessageType, SocketEvent } from "../../utils/type";
 import type { WebSocketClientSnapshot } from "../protocol";
 import { MultiplexerDaemonClient } from "./MultiplexerDaemonClient";
 
 export type MultiplexerWebSocketClientOption = {
   snapshot: WebSocketClientSnapshot;
   daemonClient: MultiplexerDaemonClient;
-  handleListClients?: () => void;
 };
 
-export class MultiplexerWebSocketClient extends WebSocketClient {
+export class MultiplexerWebSocketClient extends Client {
+  private snapshot: WebSocketClientSnapshot;
   private readonly daemonClient: MultiplexerDaemonClient;
-  private readonly handleListClientsCallback?: () => void;
 
   constructor(option: MultiplexerWebSocketClientOption) {
-    super(
-      {} as any,
-      cloneSnapshot(option.snapshot),
-      createInertWebSocket() as any,
-    );
+    super();
+    this.snapshot = cloneSnapshot(option.snapshot);
     this.daemonClient = option.daemonClient;
-    this.handleListClientsCallback = option.handleListClients;
+  }
+
+  get info(): WebSocketClientSnapshot {
+    return cloneSnapshot(this.snapshot);
   }
 
   static fromSnapshot(
     snapshot: WebSocketClientSnapshot,
     daemonClient: MultiplexerDaemonClient,
-    handleListClients?: () => void,
   ): MultiplexerWebSocketClient {
     return new MultiplexerWebSocketClient({
       snapshot,
       daemonClient,
-      handleListClients,
     });
   }
 
@@ -53,22 +45,25 @@ export class MultiplexerWebSocketClient extends WebSocketClient {
         }`,
       );
     }
-    const next = cloneSnapshot(snapshot);
-    Object.assign(this.info, next);
+    this.snapshot = cloneSnapshot(snapshot);
   }
 
   clientId(): number {
-    return this.info.id;
+    return this.snapshot.id;
   }
 
   type(): string {
-    return this.info.type;
+    return this.snapshot.type;
   }
 
   close(): void {
     void this.daemonClient
       .call("closeClient", { clientId: this.clientId() })
-      .catch(() => {});
+      .catch((error: Error) => {
+        defaultLogger.warn(
+          `Failed to close multiplexer WebSocket client: ${error.message}`,
+        );
+      });
   }
 
   sendMessage(message: string): void {
@@ -78,7 +73,11 @@ export class MultiplexerWebSocketClient extends WebSocketClient {
         clientId: this.clientId(),
         message,
       })
-      .catch(() => {});
+      .catch((error: Error) => {
+        defaultLogger.warn(
+          `Failed to send multiplexer WebSocket client message: ${error.message}`,
+        );
+      });
   }
 
   sendCustomizedMessage(
@@ -110,33 +109,13 @@ export class MultiplexerWebSocketClient extends WebSocketClient {
         message,
       })
       .then((response) => {
-        if (
-          !isCustomizedEventType(response, CustomizedEventType.CDP) &&
-          !isCustomizedEventType(response, CustomizedEventType.App)
-        ) {
-          throw new Error("Invalid Customized response type");
-        }
-
         const responseMessage = (response as any)?.data?.data?.message;
-        if (typeof responseMessage === "string") {
-          return responseMessage;
-        }
-        if (responseMessage !== undefined) {
-          const serialized = JSON.stringify(responseMessage);
-          if (serialized !== undefined) {
-            return serialized;
-          }
+        if (typeof responseMessage !== "string") {
+          throw new Error("Invalid Customized response message");
         }
 
-        throw new Error("Invalid Customized response message");
+        return responseMessage;
       });
-  }
-
-  handleListClients(): void {
-    if (this.type() !== "Driver") {
-      return;
-    }
-    this.handleListClientsCallback?.();
   }
 }
 
@@ -144,10 +123,4 @@ function cloneSnapshot(
   snapshot: WebSocketClientSnapshot,
 ): WebSocketClientSnapshot {
   return JSON.parse(JSON.stringify(snapshot));
-}
-
-function createInertWebSocket(): { on(): void } {
-  return {
-    on(): void {},
-  };
 }
