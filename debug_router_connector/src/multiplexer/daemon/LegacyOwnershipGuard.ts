@@ -50,10 +50,7 @@ export class LegacyOwnershipGuard {
 
   constructor(option: LegacyOwnershipGuardOption = {}) {
     this.driverDir = option.legacyDriverDir ?? driver_dir;
-    this.lockDir = path.join(
-      this.driverDir,
-      path.basename(lockDir),
-    );
+    this.lockDir = path.join(this.driverDir, path.basename(lockDir));
     this.monitorInterval =
       option.monitorInterval ?? DEFAULT_LEGACY_OWNERSHIP_MONITOR_INTERVAL;
     this.onStatusChanged = option.onStatusChanged;
@@ -66,7 +63,6 @@ export class LegacyOwnershipGuard {
         "Legacy ownership guard disabled by DriverCloseMultiOpen",
       );
       this.currentStatus = "attached";
-      this.emitStatusChanged("attached", "daemon-started");
       return;
     }
     if (this.monitorTimer) {
@@ -93,8 +89,6 @@ export class LegacyOwnershipGuard {
 
   reacquire(): boolean {
     if (process.env.DriverCloseMultiOpen === "true") {
-      this.currentStatus = "attached";
-      this.emitStatusChanged("attached", "reacquire-requested");
       return true;
     }
 
@@ -108,16 +102,17 @@ export class LegacyOwnershipGuard {
     }
     this.withLegacyLock(() => {
       const previousOwnerPid = this.readOwnerPid();
-      if (previousOwnerPid === null) {
-        this.writeOwnerPid("invalid-owner");
-        return;
-      }
 
       if (previousOwnerPid === process.pid) {
         if (this.currentStatus !== "attached") {
           this.currentStatus = "attached";
           this.emitStatusChanged("attached", "reacquire-requested");
         }
+        return;
+      }
+
+      if (previousOwnerPid === null) {
+        this.writeOwnerPid("invalid-owner");
         return;
       }
 
@@ -160,13 +155,6 @@ export class LegacyOwnershipGuard {
     previousOwnerPid?: number,
   ): void {
     fs.writeFileSync(this.ownerFilePath, `${process.pid}`, "utf-8");
-    const writtenOwnerPid = this.readOwnerPid();
-    if (writtenOwnerPid !== process.pid) {
-      defaultLogger.warn(
-        `Failed to verify legacy owner pid at ${this.ownerFilePath}: ${writtenOwnerPid}`,
-      );
-      return;
-    }
     this.currentStatus = "attached";
     this.emitStatusChanged("attached", reason, previousOwnerPid);
   }
@@ -184,9 +172,7 @@ export class LegacyOwnershipGuard {
       if (error?.code === "ENOENT") {
         return null;
       }
-      defaultLogger.warn(
-        `Failed to read legacy owner pid: ${error?.message}`,
-      );
+      defaultLogger.warn(`Failed to read legacy owner pid: ${error?.message}`);
       return null;
     }
   }
@@ -213,9 +199,7 @@ export class LegacyOwnershipGuard {
       return true;
     } catch (error: any) {
       if (error?.code !== "EEXIST") {
-        defaultLogger.warn(
-          `Legacy ownership lock failed: ${error?.message}`,
-        );
+        defaultLogger.warn(`Legacy ownership lock failed: ${error?.message}`);
       }
       return false;
     } finally {

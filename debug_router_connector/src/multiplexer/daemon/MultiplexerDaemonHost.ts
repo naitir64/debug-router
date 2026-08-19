@@ -138,7 +138,6 @@ export class MultiplexerDaemonHost {
   private readonly legacyOwnershipGuard: LegacyOwnershipGuard;
   private physicalDiscoveryGeneration = 0;
   private clientWatchGeneration = 0;
-  private legacyOwnershipAttached = false;
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutHandler: (() => void | Promise<void>) | undefined;
   private shutdownHandler: (() => void | Promise<void>) | undefined;
@@ -146,6 +145,10 @@ export class MultiplexerDaemonHost {
   private started = false;
   private shutdownRequested = false;
   private daemonStopReason: string | undefined;
+
+  private get legacyOwnershipAttached(): boolean {
+    return this.legacyOwnershipGuard.currentStatus === "attached";
+  }
 
   private readonly handleDeviceConnected = (device: BaseDevice): void => {
     if (!this.legacyOwnershipAttached) {
@@ -226,7 +229,6 @@ export class MultiplexerDaemonHost {
         previousOwnerPid: change.previousOwnerPid,
         reason: change.reason,
       });
-      this.legacyOwnershipAttached = true;
     }
 
     this.broadcast({
@@ -1386,7 +1388,6 @@ export class MultiplexerDaemonHost {
 
   private resetDiscoveryState(): void {
     this.physicalDiscoveryGeneration++;
-    this.legacyOwnershipAttached = false;
     this.deviceDiscoveryStarted = false;
     this.deviceDiscoveryStarting = null;
     this.deviceDiscoveryAutoListensClients = false;
@@ -1412,7 +1413,6 @@ export class MultiplexerDaemonHost {
   }
 
   private handleLegacyOwnershipLost(): void {
-    this.legacyOwnershipAttached = false;
     this.resetPhysicalDiscoveryState(
       new Error("Multiplexer legacy owner was preempted"),
     );

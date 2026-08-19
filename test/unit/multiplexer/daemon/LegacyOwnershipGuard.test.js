@@ -65,7 +65,7 @@ describe("LegacyOwnershipGuard", function () {
 
     assert.strictEqual(
       fs.readFileSync(path.join(ownerDir, "LatestDriverProcess"), "utf8"),
-      `${process.pid}`,
+      `${process.pid}`
     );
     assert.deepStrictEqual(changes, [
       {
@@ -88,13 +88,13 @@ describe("LegacyOwnershipGuard", function () {
     assert.strictEqual(
       fs.readFileSync(
         path.join(explicitDriverDir, "LatestDriverProcess"),
-        "utf8",
+        "utf8"
       ),
-      `${process.pid}`,
+      `${process.pid}`
     );
     assert.strictEqual(
       fs.existsSync(path.join(ownerDir, "LatestDriverProcess")),
-      false,
+      false
     );
   });
 
@@ -106,7 +106,7 @@ describe("LegacyOwnershipGuard", function () {
 
     assert.strictEqual(
       fs.readFileSync(path.join(ownerDir, "LatestDriverProcess"), "utf8"),
-      `${process.pid}`,
+      `${process.pid}`
     );
     assert.strictEqual(fs.existsSync(lockDir), false);
   });
@@ -173,43 +173,32 @@ describe("LegacyOwnershipGuard", function () {
           previousOwnerPid: undefined,
           reason: "invalid-owner",
         },
-      ],
+      ]
     );
     assert.strictEqual(
       fs.readFileSync(path.join(ownerDir, "LatestDriverProcess"), "utf8"),
-      `${process.pid}`,
+      `${process.pid}`
     );
   });
 
-  it("treats DriverCloseMultiOpen as attached without touching the owner file", function () {
+  it("disables ownership handling by silently attaching without touching the owner file", function () {
     const changes = [];
     process.env.DriverCloseMultiOpen = "true";
     const guard = new LegacyOwnershipGuard({
       onStatusChanged: (change) => changes.push(change),
     });
 
+    assert.strictEqual(guard.reacquire(), true);
+    assert.strictEqual(guard.currentStatus, "unInit");
     guard.start();
     assert.strictEqual(guard.reacquire(), true);
 
-    assert.deepStrictEqual(
-      changes.map((change) => ({
-        status: change.status,
-        reason: change.reason,
-      })),
-      [
-        {
-          status: "attached",
-          reason: "daemon-started",
-        },
-        {
-          status: "attached",
-          reason: "reacquire-requested",
-        },
-      ],
-    );
+    assert.strictEqual(guard.currentStatus, "attached");
+    assert.deepStrictEqual(changes, []);
+    assert.strictEqual(guard.monitorTimer, undefined);
     assert.strictEqual(
       fs.existsSync(path.join(ownerDir, "LatestDriverProcess")),
-      false,
+      false
     );
   });
 });

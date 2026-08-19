@@ -477,6 +477,7 @@ class FakeLegacyOwnershipGuard {
 
   constructor(option = {}) {
     this.option = option;
+    this.currentStatus = "unInit";
     this.startCalls = 0;
     this.stopCalls = 0;
     this.reacquireCalls = 0;
@@ -499,6 +500,7 @@ class FakeLegacyOwnershipGuard {
   }
 
   emitStatus(status, reason, previousOwnerPid) {
+    this.currentStatus = status;
     this.option.onStatusChanged?.({
       status,
       ownerPid: 100,
@@ -525,9 +527,8 @@ function createHost(options = {}) {
     memoizedNotificationTtlMs: options.memoizedNotificationTtlMs,
     now: options.now ?? (() => 1000),
   });
-  if (options.legacyOwnershipAttached !== false) {
-    host.legacyOwnershipAttached = true;
-  }
+  host.legacyOwnershipGuard.currentStatus =
+    options.legacyOwnershipAttached === false ? "unattached" : "attached";
 
   return {
     host,
@@ -775,6 +776,16 @@ describe("MultiplexerDaemonHost", function () {
     );
     assert.deepStrictEqual(controlServer.targeted, []);
     await host.stop();
+  });
+
+  it("does not expose physical devices before legacy ownership is attached", async function () {
+    const { host, physical } = createHost();
+    const device = createDevice("device-1");
+    physical.devices.set(device.serial, device);
+    host.legacyOwnershipGuard.currentStatus = "unInit";
+
+    assert.strictEqual(host.legacyOwnershipAttached, false);
+    assert.deepStrictEqual(await host.getDevices(), []);
   });
 
   it("records daemon and control socket lifecycle facts in order", async function () {
