@@ -89,6 +89,7 @@ function createManager(tempDir, values, overrides = {}) {
     controlEndpoint,
     spawnLockPath: path.join(tempDir, "spawn.lock"),
     daemonEntry: "/tmp/entry.js",
+    multiplexerDaemonIdleTimeout: overrides.multiplexerDaemonIdleTimeout ?? -1,
     startupTimeout: 100,
     readyPollInterval: 10,
     replacementTimeout: 20,
@@ -169,6 +170,10 @@ describe("MultiplexerDaemonManager", function () {
     assert.strictEqual(
       getArgumentValue(spawnCalls[0].args, "--protocol-version"),
       "1"
+    );
+    assert.strictEqual(
+      getArgumentValue(spawnCalls[0].args, "--multiplexer-daemon-idle-timeout"),
+      "-1"
     );
     assert.strictEqual(spawnCalls[0].options.argv0, manager.daemonProcessName);
     assert.strictEqual(spawnCalls[0].unref, true);

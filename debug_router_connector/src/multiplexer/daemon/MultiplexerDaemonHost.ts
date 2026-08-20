@@ -15,9 +15,7 @@ import { defaultLogger } from "../../utils/logger";
 import { WebSocketController } from "../../websocket/WebSocketServer";
 import { WebSocketClient } from "../../websocket/WebSocketConnection";
 import {
-  ClientDescription,
   DebugerRouterDriverEvents,
-  DeviceDescription,
   PhysicalConnectorEvent,
   ResponseMessageType,
 } from "../../utils/type";
@@ -93,7 +91,7 @@ export type MultiplexerDaemonHostOption = {
   protocolVersion: number;
   debugInfo?: MultiplexerDebugInfo;
   legacyDriverDir?: string;
-  multiplexerDaemonIdleTimeout?: number;
+  multiplexerDaemonIdleTimeout: number;
   memoizedNotificationTtlMs?: number;
   websocketOption?: {
     port?: number;
@@ -103,16 +101,13 @@ export type MultiplexerDaemonHostOption = {
 
   // only used for tests or embedding
   physicalConnector?: PhysicalConnector;
-  PhysicalConnectorCtor?: new (
-    option?: PhysicalConnectorOption,
-  ) => PhysicalConnector;
   now?: () => number;
 };
 
 export class MultiplexerDaemonHost {
   private physicalConnector: PhysicalConnector;
+  private readonly manualConnect: boolean;
   private readonly connectionTraceRecorder: ConnectionTraceRecorder | null;
-  private connectionTraceRecorderClosed = false;
   private readonly option: MultiplexerDaemonHostOption;
   private readonly protocolVersion: number;
   private readonly now: () => number;
@@ -121,23 +116,17 @@ export class MultiplexerDaemonHost {
   private controlServer: MultiplexerControlServer | null = null;
   private webSocketController: WebSocketControllerLike | null = null;
   private webSocketServerInfo: WebSocketServerInfo | undefined;
-  private deviceDiscoveryStarted = false;
-  private deviceDiscoveryStarting: Promise<void> | null = null;
-  private deviceDiscoveryAutoListensClients = false;
-  private readonly clientDiscoveryStartedDeviceIds = new Set<string>();
-  private readonly clientDiscoveryStartingByDeviceId = new Map<
+  private readonly clientWatcherStartedDeviceIds = new Set<string>();
+  private readonly clientWatcherStartingByDeviceId = new Map<
     string,
     Promise<void>
   >();
-  private allClientWatchersRequested = false;
   private webSocketServerStarted = false;
   private webSocketServerStarting: Promise<WebSocketServerInfo> | null = null;
   private readonly activeControlIds = new Set<number>();
   private readonly webSocketRequesterControlIds = new Set<number>();
   private readonly activeWebSocketDriverIds = new Set<number>();
   private readonly legacyOwnershipGuard: LegacyOwnershipGuard;
-  private physicalDiscoveryGeneration = 0;
-  private clientWatchGeneration = 0;
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutHandler: (() => void | Promise<void>) | undefined;
   private shutdownHandler: (() => void | Promise<void>) | undefined;
@@ -151,15 +140,10 @@ export class MultiplexerDaemonHost {
   }
 
   private readonly handleDeviceConnected = (device: BaseDevice): void => {
-    if (!this.legacyOwnershipAttached) {
-      return;
-    }
+    if (!this.legacyOwnershipAttached) return;
 
-    if (
-      this.deviceDiscoveryAutoListensClients ||
-      this.allClientWatchersRequested
-    ) {
-      void this.ensureClientDiscovery(device.serial);
+    if (!this.manualConnect) {
+      void this.ensureClientWatcher(device.serial);
     }
 
     this.webSocketController?.sendDeviceList();
@@ -167,11 +151,9 @@ export class MultiplexerDaemonHost {
   };
 
   private readonly handleDeviceDisconnected = (device: BaseDevice): void => {
-    if (!this.legacyOwnershipAttached) {
-      return;
-    }
+    if (!this.legacyOwnershipAttached) return;
 
-    this.clearClientDiscoveryForDevice(device.serial);
+    this.clearClientWatcherStartState(device.serial);
 
     this.webSocketController?.sendDeviceList();
     this.publishSnapshot();
@@ -240,6 +222,7 @@ export class MultiplexerDaemonHost {
 
   constructor(option: MultiplexerDaemonHostOption) {
     this.option = option;
+    this.manualConnect = option.physicalConnectorOption?.manualConnect ?? false;
     this.protocolVersion = option.protocolVersion;
     this.now = option.now ?? Date.now;
     this.pendingRoutes = new PendingRouteTable({
@@ -254,7 +237,12 @@ export class MultiplexerDaemonHost {
       option.connectionTrace,
       process.env.DriverConnectionTracePath,
     );
-    this.physicalConnector = this.createPhysicalConnector();
+    this.physicalConnector =
+      option.physicalConnector ??
+      new PhysicalConnector({
+        ...option.physicalConnectorOption,
+        traceRecorder: this.connectionTraceRecorder,
+      });
     this.legacyOwnershipGuard = new LegacyOwnershipGuard({
       legacyDriverDir: option.legacyDriverDir,
       onStatusChanged: this.handleLegacyOwnershipChanged,
@@ -268,9 +256,6 @@ export class MultiplexerDaemonHost {
 
     this.shutdownRequested = false;
     this.daemonStopReason = undefined;
-    if (!this.option.controlEndpoint) {
-      throw new Error("Multiplexer control endpoint is required");
-    }
     this.bindPhysicalConnectorEvents();
 
     const controlServer = new MultiplexerControlServer({
@@ -306,7 +291,7 @@ export class MultiplexerDaemonHost {
       !this.started &&
       !this.controlServer &&
       !this.webSocketController &&
-      (!this.connectionTraceRecorder || this.connectionTraceRecorderClosed)
+      !this.connectionTraceRecorder
     ) {
       return;
     }
@@ -351,7 +336,7 @@ export class MultiplexerDaemonHost {
     } catch (error) {
       stopErrors.push(error);
     } finally {
-      this.resetDiscoveryState();
+      this.clearRuntimeState();
     }
 
     if (wasStarted) {
@@ -362,13 +347,10 @@ export class MultiplexerDaemonHost {
     }
     this.daemonStopReason = undefined;
 
-    if (this.connectionTraceRecorder && !this.connectionTraceRecorderClosed) {
-      try {
-        await this.connectionTraceRecorder.close();
-        this.connectionTraceRecorderClosed = true;
-      } catch (error) {
-        stopErrors.push(error);
-      }
+    try {
+      await this.connectionTraceRecorder?.close();
+    } catch (error) {
+      stopErrors.push(error);
     }
 
     if (stopErrors.length > 0) {
@@ -378,7 +360,6 @@ export class MultiplexerDaemonHost {
 
   setIdleTimeoutHandler(handler: () => void | Promise<void>): void {
     this.idleTimeoutHandler = handler;
-    this.scheduleIdleTimeoutIfNeeded();
   }
 
   setShutdownHandler(handler: () => void | Promise<void>): void {
@@ -441,13 +422,9 @@ export class MultiplexerDaemonHost {
             .deviceId,
         );
       case "startAllDeviceClientWatchers":
-        return this.startWatchAllClients(
-          message.params as ControlRpcParams["startAllDeviceClientWatchers"],
-        );
+        return this.startWatchAllClients();
       case "stopAllDeviceClientWatchers":
-        return this.stopWatchAllClients(
-          message.params as ControlRpcParams["stopAllDeviceClientWatchers"],
-        );
+        return this.stopWatchAllClients();
       case "disconnectDevice":
         return this.disconnectDevice(
           message.params as ControlRpcParams["disconnectDevice"],
@@ -856,241 +833,118 @@ export class MultiplexerDaemonHost {
   private async connectDevices(
     params: ControlRpcParams["connectDevices"],
   ): Promise<DeviceSnapshot[]> {
-    this.legacyOwnershipGuard.reacquire();
-    const generation = this.physicalDiscoveryGeneration;
-    await this.ensureDeviceDiscovery(
-      params.isAutoListenClients ?? true,
-      generation,
+    return this.serializeDevices(
+      await this.physicalConnector.connectDevices(
+        params.timeout ?? -1,
+        params.serial ?? null,
+      ),
     );
-    this.assertPhysicalDiscoveryCurrent(generation);
-    return this.getDeviceSnapshots({
-      timeout: params.timeout,
-      serial: params.serial,
-    });
-  }
-
-  private async getDeviceSnapshots(
-    params: Pick<ControlRpcParams["connectDevices"], "timeout" | "serial">,
-  ): Promise<DeviceSnapshot[]> {
-    this.assertPhysicalDiscoveryCurrent(this.physicalDiscoveryGeneration);
-    const devices = await this.physicalConnector.getDevices(
-      params.timeout ?? -1,
-      params.serial ?? null,
-    );
-    return this.serializeDevices(devices);
   }
 
   private async connectUsbClients(
     params: ControlRpcParams["connectUsbClients"],
   ): Promise<ClientSnapshot[]> {
-    const generation = this.physicalDiscoveryGeneration;
-    await this.ensureDeviceDiscovery(false, generation);
-    await this.ensureClientDiscovery(params.deviceId, generation);
-    this.assertPhysicalDiscoveryCurrent(generation);
-
-    const clients = await this.getDeviceUsbClients(
-      params.deviceId,
-      params.timeout ?? -1,
-      params.waitTimeout ?? true,
-      params.clientName ?? null,
+    defaultLogger.debug(
+      "connectUsbClients of :" +
+        params.deviceId +
+        " waitTimeout:" +
+        (params.waitTimeout ?? true) +
+        " timeout:" +
+        (params.timeout ?? -1),
     );
+    if (!this.physicalConnector.devices.has(params.deviceId)) {
+      defaultLogger.debug("connectUsbClients: resolve device == null");
+      return [];
+    }
+    await this.ensureClientWatcher(params.deviceId);
+    const clients =
+      params.waitTimeout ?? true
+        ? await this.physicalConnector.getDeviceUsbClients(
+            params.deviceId,
+            params.timeout ?? -1,
+            params.clientName ?? null,
+          )
+        : await this.physicalConnector.waitDeviceUsbClients(
+            params.deviceId,
+            params.timeout ?? -1,
+          );
     const snapshots = this.serializeClients(clients);
+    const clientInfos = clients.map((client) => client.info);
+    defaultLogger.debug(
+      "connectUsbClients: clients:" + JSON.stringify(clientInfos),
+    );
     this.publishClientSnapshot();
     return snapshots;
   }
 
-  /**
-   * Starts client discovery for one device without changing whether newly
-   * discovered devices should be watched automatically.
-   */
   private async startWatchClient(deviceId: string): Promise<void> {
-    const generation = this.physicalDiscoveryGeneration;
-    const clientWatchGeneration = this.clientWatchGeneration;
-    await this.ensureDeviceDiscovery(false, generation);
-    await this.ensureClientDiscovery(
-      deviceId,
-      generation,
-      clientWatchGeneration,
-    );
+    await this.ensureClientWatcher(deviceId);
   }
 
-  /**
-   * Stops client discovery for one device. The device remains connected and
-   * can be watched again through startWatchClient.
-   */
   private async stopWatchClient(deviceId: string): Promise<void> {
-    this.clearClientDiscoveryForDevice(deviceId);
-
-    const device = this.physicalConnector.devices.get(deviceId);
-    if (!device) {
-      return;
-    }
-
-    await device.stopWatchClient();
+    this.clearClientWatcherStartState(deviceId);
+    await this.physicalConnector.devices.get(deviceId)?.stopWatchClient();
   }
 
   private disconnectDevice(params: ControlRpcParams["disconnectDevice"]): void {
-    this.clearClientDiscoveryForDevice(params.deviceId);
+    this.clearClientWatcherStartState(params.deviceId);
+    this.physicalConnector.devices.get(params.deviceId)?.disConnect();
+  }
 
-    const device = this.physicalConnector.devices.get(params.deviceId);
+  private async ensureClientWatcher(deviceId: string): Promise<void> {
+    const device = this.physicalConnector.devices.get(deviceId);
     if (!device) {
+      defaultLogger.debug(
+        "ensureClientWatcher: resolve device == null:" + deviceId,
+      );
+      return;
+    }
+    this.assertLegacyOwnershipAttached();
+    if (this.clientWatcherStartedDeviceIds.has(deviceId)) {
       return;
     }
 
-    device.disConnect();
-  }
-
-  private async ensureDeviceDiscovery(
-    isAutoListenClients: boolean = true,
-    generation: number = this.physicalDiscoveryGeneration,
-  ): Promise<void> {
-    this.assertPhysicalDiscoveryCurrent(generation);
-    if (!this.deviceDiscoveryStarted && !this.deviceDiscoveryStarting) {
-      this.deviceDiscoveryStarting = this.physicalConnector
-        .connectDevices(-1, null)
-        .then(() => {
-          if (this.isPhysicalDiscoveryCurrent(generation)) {
-            this.deviceDiscoveryStarted = true;
-          }
-        })
-        .finally(() => {
-          if (this.isPhysicalDiscoveryCurrent(generation)) {
-            this.deviceDiscoveryStarting = null;
-          }
-        });
-    }
-
-    if (this.deviceDiscoveryStarting) {
-      await this.deviceDiscoveryStarting;
-    }
-    this.assertPhysicalDiscoveryCurrent(generation);
-    if (isAutoListenClients) {
-      await this.ensureAutoClientDiscovery(generation);
-    }
-  }
-
-  private async ensureAutoClientDiscovery(
-    generation: number = this.physicalDiscoveryGeneration,
-  ): Promise<void> {
-    this.assertPhysicalDiscoveryCurrent(generation);
-    if (this.option.physicalConnectorOption?.manualConnect) {
-      return;
-    }
-
-    this.deviceDiscoveryAutoListensClients = true;
-    await this.ensureClientDiscoveryForCurrentDevices(generation);
-  }
-
-  private async ensureClientDiscovery(
-    deviceId: string,
-    generation: number = this.physicalDiscoveryGeneration,
-    clientWatchGeneration: number = this.clientWatchGeneration,
-  ): Promise<void> {
-    this.assertPhysicalDiscoveryCurrent(generation);
-    if (clientWatchGeneration !== this.clientWatchGeneration) {
-      return;
-    }
-    if (this.clientDiscoveryStartedDeviceIds.has(deviceId)) {
-      return;
-    }
-
-    const existing = this.clientDiscoveryStartingByDeviceId.get(deviceId);
-    if (existing) {
-      await existing;
-      return;
-    }
+    const existing = this.clientWatcherStartingByDeviceId.get(deviceId);
+    if (existing) return existing;
 
     const starting = Promise.resolve()
       .then(async () => {
-        this.assertPhysicalDiscoveryCurrent(generation);
-        if (clientWatchGeneration !== this.clientWatchGeneration) {
-          return;
-        }
-        const device = this.physicalConnector.devices.get(deviceId);
-        if (!device) {
-          return;
-        }
-
         await this.physicalConnector.startWatchClient(
           device,
-          () =>
-            this.isPhysicalDiscoveryCurrent(generation) &&
-            clientWatchGeneration === this.clientWatchGeneration,
+          () => this.legacyOwnershipAttached,
         );
-        if (
-          this.isPhysicalDiscoveryCurrent(generation) &&
-          clientWatchGeneration === this.clientWatchGeneration
-        ) {
-          this.clientDiscoveryStartedDeviceIds.add(deviceId);
-        }
+        this.clientWatcherStartedDeviceIds.add(deviceId);
       })
       .finally(() => {
-        if (
-          this.isPhysicalDiscoveryCurrent(generation) &&
-          this.clientDiscoveryStartingByDeviceId.get(deviceId) === starting
-        ) {
-          this.clientDiscoveryStartingByDeviceId.delete(deviceId);
+        if (this.clientWatcherStartingByDeviceId.get(deviceId) === starting) {
+          this.clientWatcherStartingByDeviceId.delete(deviceId);
         }
       });
 
-    this.clientDiscoveryStartingByDeviceId.set(deviceId, starting);
+    this.clientWatcherStartingByDeviceId.set(deviceId, starting);
     await starting;
   }
 
-  private async getDeviceUsbClients(
-    deviceId: string,
-    timeout: number,
-    waitTimeout: boolean,
-    clientName: string | null,
-  ): Promise<UsbClient[]> {
-    if (!waitTimeout) {
-      return this.physicalConnector.waitDeviceUsbClients(deviceId, timeout);
-    }
-
-    return this.physicalConnector.getDeviceUsbClients(
-      deviceId,
-      timeout,
-      clientName,
-    );
-  }
-
-  private async startWatchAllClients(
-    _params: ControlRpcParams["startAllDeviceClientWatchers"],
-  ): Promise<void> {
+  private async startWatchAllClients(): Promise<void> {
     this.legacyOwnershipGuard.reacquire();
-    const generation = this.physicalDiscoveryGeneration;
-    const clientWatchGeneration = this.clientWatchGeneration;
-    this.assertPhysicalDiscoveryCurrent(generation);
-    this.allClientWatchersRequested = true;
-    await this.ensureDeviceDiscovery(false, generation);
-    if (clientWatchGeneration !== this.clientWatchGeneration) {
-      return;
-    }
-    await this.ensureClientDiscoveryForCurrentDevices(
-      generation,
-      clientWatchGeneration,
-    );
+    await this.ensureAllClientWatchers();
     this.publishClientSnapshot();
   }
 
-  /**
-   * Stops every current client watcher and prevents both all-client and
-   * connectDevices auto-watch modes from starting watchers for later devices.
-   * Explicit watcher RPCs can enable discovery again.
-   */
-  private async stopWatchAllClients(
-    _params: ControlRpcParams["stopAllDeviceClientWatchers"],
-  ): Promise<void> {
-    this.clientWatchGeneration++;
-    this.allClientWatchersRequested = false;
-    this.deviceDiscoveryAutoListensClients = false;
-
-    await Promise.allSettled(
-      Array.from(this.clientDiscoveryStartingByDeviceId.values()),
+  private async ensureAllClientWatchers(): Promise<void> {
+    await Promise.all(
+      Array.from(this.physicalConnector.devices.keys(), (deviceId) =>
+        this.ensureClientWatcher(deviceId),
+      ),
     );
-    this.clientDiscoveryStartingByDeviceId.clear();
-    this.clientDiscoveryStartedDeviceIds.clear();
+  }
 
+  private async stopWatchAllClients(): Promise<void> {
+    await Promise.allSettled(
+      Array.from(this.clientWatcherStartingByDeviceId.values()),
+    );
+    this.clientWatcherStartingByDeviceId.clear();
+    this.clientWatcherStartedDeviceIds.clear();
     await Promise.all(
       Array.from(this.physicalConnector.devices.values(), (device) =>
         device.stopWatchClient(),
@@ -1261,47 +1115,15 @@ export class MultiplexerDaemonHost {
   }
 
   private serializeDevice(device: BaseDevice): DeviceSnapshot {
-    const info: DeviceDescription = device.info;
-    const host = safeGetDeviceHost(device);
-    const snapshot: DeviceSnapshot = {
-      os: info.os,
-      title: info.title,
-      serial: info.serial,
+    return {
+      ...device.info,
       ports: [...device.ports],
+      host: device.getHost(),
     };
-
-    if (host !== undefined) {
-      snapshot.host = host;
-    }
-
-    return snapshot;
   }
 
   private serializeClient(client: UsbClient): ClientSnapshot {
-    const info: ClientDescription = client.info;
-    const rawInfo = cloneJsonValue(info.query.raw_info);
-    const query = {
-      app: info.query.app,
-      os: info.query.os,
-      device: info.query.device,
-      device_model: info.query.device_model,
-      device_id: info.query.device_id,
-      sdk_version: info.query.sdk_version,
-      raw_info: rawInfo,
-    };
-
-    if (query.sdk_version === undefined) {
-      delete query.sdk_version;
-    }
-    if (query.raw_info === undefined) {
-      delete query.raw_info;
-    }
-
-    return {
-      port: info.port,
-      id: info.id,
-      query,
-    };
+    return { ...client.info };
   }
 
   private serializeWebSocketClient(
@@ -1355,45 +1177,13 @@ export class MultiplexerDaemonHost {
     );
   }
 
-  private createPhysicalConnector(): PhysicalConnector {
-    if (this.option.physicalConnector && !this.option.PhysicalConnectorCtor) {
-      return this.option.physicalConnector;
-    }
-
-    const PhysicalConnectorCtor =
-      this.option.PhysicalConnectorCtor ?? PhysicalConnector;
-    return new PhysicalConnectorCtor({
-      ...this.option.physicalConnectorOption,
-      traceRecorder: this.connectionTraceRecorder,
-    });
+  private clearClientWatcherStartState(deviceId: string): void {
+    this.clientWatcherStartedDeviceIds.delete(deviceId);
+    this.clientWatcherStartingByDeviceId.delete(deviceId);
   }
 
-  private async ensureClientDiscoveryForCurrentDevices(
-    generation: number = this.physicalDiscoveryGeneration,
-    clientWatchGeneration: number = this.clientWatchGeneration,
-  ): Promise<void> {
-    this.assertPhysicalDiscoveryCurrent(generation);
-    const deviceIds = Array.from(this.physicalConnector.devices.keys());
-    await Promise.all(
-      deviceIds.map((deviceId) =>
-        this.ensureClientDiscovery(deviceId, generation, clientWatchGeneration),
-      ),
-    );
-  }
-
-  private clearClientDiscoveryForDevice(deviceId: string): void {
-    this.clientDiscoveryStartedDeviceIds.delete(deviceId);
-    this.clientDiscoveryStartingByDeviceId.delete(deviceId);
-  }
-
-  private resetDiscoveryState(): void {
-    this.physicalDiscoveryGeneration++;
-    this.deviceDiscoveryStarted = false;
-    this.deviceDiscoveryStarting = null;
-    this.deviceDiscoveryAutoListensClients = false;
-    this.clientDiscoveryStartedDeviceIds.clear();
-    this.clientDiscoveryStartingByDeviceId.clear();
-    this.allClientWatchersRequested = false;
+  private clearRuntimeState(): void {
+    this.clearAllClientWatcherStartState();
     this.webSocketServerStarted = false;
     this.webSocketServerStarting = null;
     this.activeControlIds.clear();
@@ -1413,7 +1203,10 @@ export class MultiplexerDaemonHost {
   }
 
   private handleLegacyOwnershipLost(): void {
-    this.resetPhysicalDiscoveryState(
+    this.clearAllClientWatcherStartState();
+    this.memoizedNotificationQueryTable.clear();
+    this.rejectRoutes(
+      this.pendingRoutes.clear(),
       new Error("Multiplexer legacy owner was preempted"),
     );
     this.physicalConnector.disableAllClients();
@@ -1424,27 +1217,13 @@ export class MultiplexerDaemonHost {
     this.webSocketController?.sendClientList();
   }
 
-  private resetPhysicalDiscoveryState(error: Error): void {
-    this.physicalDiscoveryGeneration++;
-    this.deviceDiscoveryStarted = false;
-    this.deviceDiscoveryStarting = null;
-    this.deviceDiscoveryAutoListensClients = false;
-    this.clientDiscoveryStartedDeviceIds.clear();
-    this.clientDiscoveryStartingByDeviceId.clear();
-    this.allClientWatchersRequested = false;
-    this.memoizedNotificationQueryTable.clear();
-    this.rejectRoutes(this.pendingRoutes.clear(), error);
+  private clearAllClientWatcherStartState(): void {
+    this.clientWatcherStartedDeviceIds.clear();
+    this.clientWatcherStartingByDeviceId.clear();
   }
 
-  private isPhysicalDiscoveryCurrent(generation: number): boolean {
-    return (
-      this.legacyOwnershipAttached &&
-      this.physicalDiscoveryGeneration === generation
-    );
-  }
-
-  private assertPhysicalDiscoveryCurrent(generation: number): void {
-    if (!this.isPhysicalDiscoveryCurrent(generation)) {
+  private assertLegacyOwnershipAttached(): void {
+    if (!this.legacyOwnershipAttached) {
       throw new Error("Multiplexer legacy owner is not attached");
     }
   }
@@ -1620,8 +1399,8 @@ export class MultiplexerDaemonHost {
       return;
     }
 
-    const idleTimeout = this.getIdleTimeout();
-    if (idleTimeout === undefined || !this.isIdle()) {
+    const idleTimeout = this.option.multiplexerDaemonIdleTimeout;
+    if (idleTimeout < 0 || !this.isIdle()) {
       return;
     }
 
@@ -1651,19 +1430,6 @@ export class MultiplexerDaemonHost {
   private isIdle(): boolean {
     return !this.isInUse();
   }
-
-  private getIdleTimeout(): number | undefined {
-    const idleTimeout = this.option.multiplexerDaemonIdleTimeout;
-    if (
-      idleTimeout === undefined ||
-      !Number.isFinite(idleTimeout) ||
-      idleTimeout < 0
-    ) {
-      return undefined;
-    }
-
-    return idleTimeout;
-  }
 }
 
 function createControlError(
@@ -1685,17 +1451,6 @@ function createStopError(errors: unknown[]): Error {
   const stopError = new Error(`Failed to stop multiplexer host: ${message}`);
   (stopError as any).errors = errors;
   return stopError;
-}
-
-function safeGetDeviceHost(device: BaseDevice): string | undefined {
-  try {
-    return device.getHost();
-  } catch (error: any) {
-    defaultLogger.warn(
-      `Failed to serialize multiplexer device host: ${error?.message}`,
-    );
-    return undefined;
-  }
 }
 
 function cloneJsonValue(value: unknown): unknown {

@@ -489,6 +489,11 @@ async function main() {
     at: Date.now(),
   });
 
+  const physicalConnectorOption = {
+    ...entryOption.physicalConnectorOption,
+    multiplexerDataDirForFake: dataDir,
+  };
+  const physicalConnector = new FakePhysicalConnector(physicalConnectorOption);
   const host = new MultiplexerDaemonHost({
     controlEndpoint: entryOption.controlEndpoint,
     protocolVersion: entryOption.protocolVersion,
@@ -498,12 +503,10 @@ async function main() {
     enableWebSocket: entryOption.enableWebSocket,
     connectionTrace: entryOption.connectionTrace,
     websocketOption: entryOption.websocketOption,
-    physicalConnectorOption: {
-      ...entryOption.physicalConnectorOption,
-      multiplexerDataDirForFake: dataDir,
-    },
-    PhysicalConnectorCtor: FakePhysicalConnector,
+    physicalConnectorOption,
+    physicalConnector,
   });
+  physicalConnector.traceRecorder = host.connectionTraceRecorder;
   const handleControlConnected = host.handleControlConnected.bind(host);
   const handleControlDisconnected = host.handleControlDisconnected.bind(host);
   host.handleControlConnected = (controlId) => {

@@ -56,6 +56,7 @@ export type MultiplexerDaemonManagerOption = {
   controlEndpoint: string;
   spawnLockPath: string;
   daemonEntry: string;
+  multiplexerDaemonIdleTimeout: number;
 
   // Optional manager tuning with constructor defaults.
   startupTimeout?: number;
@@ -68,7 +69,6 @@ export type MultiplexerDaemonManagerOption = {
   // argument so the daemon or Host can apply its own default behavior.
   debugInfo?: MultiplexerDebugInfo;
   legacyDriverDir?: string;
-  multiplexerDaemonIdleTimeout?: number;
   enableWebSocket?: boolean;
   connectionTrace?: ConnectionTraceOptions;
   websocketOption?: {
@@ -95,7 +95,7 @@ export class MultiplexerDaemonManager {
   readonly localProtocolVersion: number;
   readonly debugInfo?: MultiplexerDebugInfo;
   readonly legacyDriverDir?: string;
-  readonly multiplexerDaemonIdleTimeout?: number;
+  readonly multiplexerDaemonIdleTimeout: number;
   readonly enableWebSocket?: boolean;
   readonly connectionTrace?: ConnectionTraceOptions;
   readonly websocketOption?: {
@@ -460,6 +460,8 @@ export class MultiplexerDaemonManager {
       this.controlEndpoint,
       "--protocol-version",
       String(this.localProtocolVersion),
+      "--multiplexer-daemon-idle-timeout",
+      String(this.multiplexerDaemonIdleTimeout),
     ];
 
     if (this.debugInfo) {
@@ -467,12 +469,6 @@ export class MultiplexerDaemonManager {
     }
     if (this.legacyDriverDir !== undefined) {
       args.push("--legacy-driver-dir", this.legacyDriverDir);
-    }
-    if (this.multiplexerDaemonIdleTimeout !== undefined) {
-      args.push(
-        "--multiplexer-daemon-idle-timeout",
-        String(this.multiplexerDaemonIdleTimeout),
-      );
     }
     if (this.enableWebSocket !== undefined) {
       args.push("--enable-websocket", String(this.enableWebSocket));

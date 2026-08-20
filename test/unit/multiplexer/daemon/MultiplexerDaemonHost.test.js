@@ -524,6 +524,7 @@ function createHost(options = {}) {
     enableWebSocket: options.enableWebSocket,
     websocketOption: options.websocketOption,
     connectionTrace: options.connectionTrace,
+    multiplexerDaemonIdleTimeout: options.multiplexerDaemonIdleTimeout ?? -1,
     memoizedNotificationTtlMs: options.memoizedNotificationTtlMs,
     now: options.now ?? (() => 1000),
   });
@@ -693,52 +694,25 @@ describe("MultiplexerDaemonHost", function () {
     defaultLogger.setOutput(() => {});
   });
 
-  it("constructs a physical connector with a daemon-owned trace recorder", async function () {
-    const calls = [];
-    const callerRecorder = { source: "caller" };
-    class PhysicalConnectorCtor extends FakePhysicalConnector {
-      constructor(option) {
-        calls.push(option);
-        super(option);
-      }
-    }
-
+  it("uses an injected physical connector for tests and embedding", async function () {
+    const physical = new FakePhysicalConnector();
     const host = new MultiplexerDaemonHost({
-      PhysicalConnectorCtor,
+      physicalConnector: physical,
       controlEndpoint: "/tmp/debug-router-host-control.sock",
       protocolVersion: 3,
+      multiplexerDaemonIdleTimeout: -1,
       connectionTrace: {
         enabled: true,
         output: { write() {} },
-      },
-      physicalConnectorOption: {
-        manualConnect: true,
-        traceRecorder: callerRecorder,
       },
     });
     const snapshot = host.createSnapshot();
     const controlServer = attachControlServer(host);
 
-    assert.strictEqual(calls.length, 1);
-    assert.strictEqual(calls[0].manualConnect, true);
-    assert.strictEqual("protocolVersion" in calls[0], false);
-    assert.ok(calls[0].traceRecorder);
-    assert.notStrictEqual(calls[0].traceRecorder, callerRecorder);
-    assert.strictEqual(calls[0].traceRecorder, host.connectionTraceRecorder);
-    calls[0].traceRecorder.recordWatchClientStart("device-1", {
-      source: "host-test",
-    });
-    const trace = calls[0].traceRecorder.getRecentNodes(1);
+    assert.strictEqual(host.physicalConnector, physical);
     assert.deepStrictEqual(snapshot.devices, []);
     assert.deepStrictEqual(snapshot.clients, []);
     assert.strictEqual("connectionTrace" in snapshot, false);
-    assert.deepStrictEqual(
-      trace.map((node) => node.event),
-      ["client_watch_started"]
-    );
-    assert.deepStrictEqual(trace[0].metadata, {
-      source: "host-test",
-    });
     assert.deepStrictEqual(controlServer.targeted, []);
     assert.strictEqual("webSocketServerStarted" in snapshot, false);
     assert.strictEqual("webSocketServerInfo" in snapshot, false);
@@ -1067,45 +1041,30 @@ describe("MultiplexerDaemonHost", function () {
     assert.deepStrictEqual(controlServer.broadcasts, []);
   });
 
-  it("serializes device host failures and non-json client raw_info without leaking invalid fields", function () {
+  it("serializes device and client snapshots from their public info", function () {
     const { host, physical } = createHost();
-    const circularRawInfo = {};
-    circularRawInfo.self = circularRawInfo;
-    const hostlessDevice = createDevice("device-hostless", {
-      throwHost: true,
+    const device = createDevice("device-1", {
+      host: "127.0.0.1",
     });
-    const noSdkClient = createClient(1, {
-      rawInfo: undefined,
-      sdkVersion: undefined,
-    });
-    const circularClient = createClient(2, {
-      rawInfo: circularRawInfo,
+    const client = createClient(2, {
+      rawInfo: { App: "Demo" },
       sdkVersion: "2.0.0",
     });
-    const nullRawInfoClient = createClient(3, {
-      rawInfo: null,
-    });
-    physical.devices.set(hostlessDevice.serial, hostlessDevice);
-    physical.usbClients.set(noSdkClient.clientId(), noSdkClient);
-    physical.usbClients.set(circularClient.clientId(), circularClient);
-    physical.usbClients.set(nullRawInfoClient.clientId(), nullRawInfoClient);
+    physical.devices.set(device.serial, device);
+    physical.usbClients.set(client.clientId(), client);
 
     const snapshot = host.createSnapshot();
 
     assert.deepStrictEqual(snapshot.devices, [
       {
         os: "Android",
-        title: "Device device-hostless",
-        serial: "device-hostless",
+        title: "Device device-1",
+        serial: "device-1",
         ports: [8901, 8902],
+        host: "127.0.0.1",
       },
     ]);
-    assert.strictEqual("host" in snapshot.devices[0], false);
-    assert.strictEqual("sdk_version" in snapshot.clients[0].query, false);
-    assert.strictEqual("raw_info" in snapshot.clients[0].query, false);
-    assert.strictEqual("raw_info" in snapshot.clients[1].query, false);
-    assert.strictEqual(snapshot.clients[1].query.sdk_version, "2.0.0");
-    assert.strictEqual(snapshot.clients[2].query.raw_info, null);
+    assert.deepStrictEqual(snapshot.clients, [{ ...client.info }]);
   });
 
   it("preserves missing WebSocket raw_info in wire snapshots", function () {
@@ -1273,7 +1232,7 @@ describe("MultiplexerDaemonHost", function () {
     );
   });
 
-  it("invalidates in-flight device discovery when legacy ownership is lost", async function () {
+  it("lets in-flight device connection complete after legacy ownership is lost", async function () {
     const deferred = createDeferred();
     const physical = new FakePhysicalConnector({
       connectDevicesImpl: () => deferred.promise,
@@ -1296,45 +1255,12 @@ describe("MultiplexerDaemonHost", function () {
     host.legacyOwnershipGuard.emitStatus("unattached", "legacy-preempted", 200);
     deferred.resolve([device]);
 
-    await assert.rejects(discovery, /legacy owner is not attached/);
-    assert.strictEqual(host.deviceDiscoveryStarted, false);
-    assert.strictEqual(host.deviceDiscoveryStarting, null);
-    assert.deepStrictEqual(host.clientDiscoveryStartingByDeviceId.size, 0);
-    assert.deepStrictEqual(host.clientDiscoveryStartedDeviceIds.size, 0);
-    assert.deepStrictEqual(physical.startWatchClientCalls, []);
-  });
-
-  it("invalidates in-flight client watcher startup when legacy ownership is lost", async function () {
-    const startDeferred = createDeferred();
-    const { host, physical } = createHost({
-      startWatchClientImpl: async (device, shouldStart) => {
-        await startDeferred.promise;
-        if (shouldStart()) {
-          device.startWatchClient();
-        }
-      },
-    });
-    const device = createDevice("device-1");
-    physical.devices.set(device.serial, device);
-    attachControlServer(host);
-
-    const discovery = host.handleControlRpc(
-      1,
-      createRpcRequest("connectUsbClients", {
-        deviceId: "device-1",
-      })
+    const result = await discovery;
+    assert.deepStrictEqual(
+      result.map((snapshot) => snapshot.serial),
+      ["device-1"]
     );
-    await nextTick();
-    assert.deepStrictEqual(physical.startWatchClientCalls, ["device-1"]);
-
-    host.legacyOwnershipGuard.emitStatus("unattached", "legacy-preempted", 200);
-    startDeferred.resolve();
-
-    await assert.rejects(discovery, /legacy owner is not attached/);
-    assert.strictEqual(device.state.startWatchCalls, 0);
-    assert.strictEqual(host.clientDiscoveryStartingByDeviceId.size, 0);
-    assert.strictEqual(host.clientDiscoveryStartedDeviceIds.size, 0);
-    assert.deepStrictEqual(physical.getDeviceUsbClientsCalls, []);
+    assert.deepStrictEqual(physical.startWatchClientCalls, []);
   });
 
   it("startAllDeviceClientWatchers reacquires legacy ownership and restores watchers", async function () {
@@ -1463,7 +1389,7 @@ describe("MultiplexerDaemonHost", function () {
     );
   });
 
-  it("connectDevices starts device discovery once and auto-starts client discovery", async function () {
+  it("connectDevices forwards each device query and watches later device events", async function () {
     const { host, physical } = createHost();
     const device = createDevice("device-1");
     const nextDevice = createDevice("device-2");
@@ -1494,15 +1420,15 @@ describe("MultiplexerDaemonHost", function () {
 
     assert.deepStrictEqual(physical.connectDevicesCalls, [
       {
-        timeout: -1,
+        timeout: 10,
+        serial: "device-1",
+      },
+      {
+        timeout: 20,
         serial: null,
       },
     ]);
     assert.deepStrictEqual(physical.getDevicesCalls, [
-      {
-        timeout: -1,
-        serial: null,
-      },
       {
         timeout: 10,
         serial: "device-1",
@@ -1512,11 +1438,8 @@ describe("MultiplexerDaemonHost", function () {
         serial: null,
       },
     ]);
-    assert.deepStrictEqual(physical.startWatchClientCalls, [
-      "device-1",
-      "device-2",
-    ]);
-    assert.strictEqual(device.state.startWatchCalls, 1);
+    assert.deepStrictEqual(physical.startWatchClientCalls, ["device-2"]);
+    assert.strictEqual(device.state.startWatchCalls, 0);
     assert.strictEqual(nextDevice.state.startWatchCalls, 1);
     assert.deepStrictEqual(
       first.map((item) => item.serial),
@@ -1528,15 +1451,15 @@ describe("MultiplexerDaemonHost", function () {
     );
   });
 
-  it("connectDevices skips auto client discovery for manualConnect and explicit false", async function () {
+  it("manualConnect controls whether connected-device events start watchers", async function () {
     const manual = createHost({
       manualConnect: true,
     });
     const autoDisabled = createHost();
     const manualDevice = createDevice("manual-device");
     const disabledDevice = createDevice("disabled-device");
-    manual.physical.devices.set(manualDevice.serial, manualDevice);
-    autoDisabled.physical.devices.set(disabledDevice.serial, disabledDevice);
+    bindHostEvents(manual.host);
+    bindHostEvents(autoDisabled.host);
 
     await manual.host.handleControlRpc(
       1,
@@ -1550,12 +1473,19 @@ describe("MultiplexerDaemonHost", function () {
         isAutoListenClients: false,
       })
     );
+    manual.physical.devices.set(manualDevice.serial, manualDevice);
+    manual.physical.emit("device-connected", manualDevice);
+    autoDisabled.physical.devices.set(disabledDevice.serial, disabledDevice);
+    autoDisabled.physical.emit("device-connected", disabledDevice);
+    await nextTick();
 
     assert.deepStrictEqual(manual.physical.startWatchClientCalls, []);
-    assert.deepStrictEqual(autoDisabled.physical.startWatchClientCalls, []);
+    assert.deepStrictEqual(autoDisabled.physical.startWatchClientCalls, [
+      "disabled-device",
+    ]);
   });
 
-  it("shares an in-flight device discovery attempt", async function () {
+  it("forwards concurrent device connection requests independently", async function () {
     const deferred = createDeferred();
     const physical = new FakePhysicalConnector({
       connectDevicesImpl: () => deferred.promise,
@@ -1581,10 +1511,10 @@ describe("MultiplexerDaemonHost", function () {
     deferred.resolve([device]);
     await Promise.all([first, second]);
 
-    assert.strictEqual(physical.connectDevicesCalls.length, 1);
+    assert.strictEqual(physical.connectDevicesCalls.length, 2);
   });
 
-  it("connectUsbClients starts discovery, watches target device once, and uses getDeviceUsbClients by default", async function () {
+  it("connectUsbClients watches the target device once and uses getDeviceUsbClients by default", async function () {
     const { host, physical } = createHost();
     const device = createDevice("device-1");
     const client = createClient(8, {
@@ -1612,12 +1542,7 @@ describe("MultiplexerDaemonHost", function () {
       })
     );
 
-    assert.deepStrictEqual(physical.connectDevicesCalls, [
-      {
-        timeout: -1,
-        serial: null,
-      },
-    ]);
+    assert.deepStrictEqual(physical.connectDevicesCalls, []);
     assert.deepStrictEqual(physical.startWatchClientCalls, ["device-1"]);
     assert.deepStrictEqual(physical.getDeviceUsbClientsCalls, [
       {
@@ -1641,6 +1566,7 @@ describe("MultiplexerDaemonHost", function () {
         device: "Pixel",
         device_model: "Pixel",
         device_id: "device-1",
+        sdk_version: undefined,
         raw_info: {
           App: "Demo",
         },
@@ -1714,7 +1640,7 @@ describe("MultiplexerDaemonHost", function () {
     const deferred = createDeferred();
     const device = createDevice("device-1");
     physical.devices.set(device.serial, device);
-    host.clientDiscoveryStartingByDeviceId.set("device-1", deferred.promise);
+    host.clientWatcherStartingByDeviceId.set("device-1", deferred.promise);
 
     const promise = host.handleControlRpc(
       1,
@@ -1749,13 +1675,7 @@ describe("MultiplexerDaemonHost", function () {
     );
 
     assert.deepStrictEqual(physical.startWatchClientCalls, []);
-    assert.deepStrictEqual(physical.getDeviceUsbClientsCalls, [
-      {
-        deviceId: "missing-device",
-        timeout: -1,
-        clientName: null,
-      },
-    ]);
+    assert.deepStrictEqual(physical.getDeviceUsbClientsCalls, []);
     assert.deepStrictEqual(result, []);
   });
 
@@ -1786,7 +1706,7 @@ describe("MultiplexerDaemonHost", function () {
     ]);
   });
 
-  it("startDeviceClientWatcher starts device discovery and watches each device only once", async function () {
+  it("startDeviceClientWatcher watches each existing device only once", async function () {
     const { host, physical } = createHost();
     const device = createDevice("device-1");
     physical.devices.set(device.serial, device);
@@ -1810,12 +1730,7 @@ describe("MultiplexerDaemonHost", function () {
       })
     );
 
-    assert.deepStrictEqual(physical.connectDevicesCalls, [
-      {
-        timeout: -1,
-        serial: null,
-      },
-    ]);
+    assert.deepStrictEqual(physical.connectDevicesCalls, []);
     assert.deepStrictEqual(physical.startWatchClientCalls, ["device-1"]);
     assert.strictEqual(device.state.startWatchCalls, 1);
   });
@@ -1916,7 +1831,7 @@ describe("MultiplexerDaemonHost", function () {
     ]);
   });
 
-  it("stopAllDeviceClientWatchers stops current watchers and ignores later devices", async function () {
+  it("stopAllDeviceClientWatchers stops current watchers while auto-watching later devices", async function () {
     const { host, physical } = createHost();
     const firstDevice = createDevice("device-1");
     const secondDevice = createDevice("device-2");
@@ -1942,22 +1857,22 @@ describe("MultiplexerDaemonHost", function () {
     assert.deepStrictEqual(physical.startWatchClientCalls, [
       "device-1",
       "device-2",
+      "device-3",
     ]);
     assert.strictEqual(firstDevice.state.stopWatchCalls, 1);
     assert.strictEqual(secondDevice.state.stopWatchCalls, 1);
-    assert.strictEqual(laterDevice.state.startWatchCalls, 0);
-    assert.strictEqual(host.allClientWatchersRequested, false);
-    assert.strictEqual(host.deviceDiscoveryAutoListensClients, false);
-    assert.deepStrictEqual(
-      Array.from(host.clientDiscoveryStartedDeviceIds),
-      []
-    );
+    assert.strictEqual(laterDevice.state.startWatchCalls, 1);
   });
 
-  it("stopAllDeviceClientWatchers cancels an in-flight startAllDeviceClientWatchers request", async function () {
+  it("stopAllDeviceClientWatchers waits for an in-flight watcher before stopping it", async function () {
     const deferred = createDeferred();
     const { host, physical } = createHost({
-      connectDevicesImpl: () => deferred.promise,
+      startWatchClientImpl: async (device, shouldStart) => {
+        await deferred.promise;
+        if (shouldStart()) {
+          device.startWatchClient();
+        }
+      },
     });
     const device = createDevice("device-1");
     physical.devices.set(device.serial, device);
@@ -1967,17 +1882,18 @@ describe("MultiplexerDaemonHost", function () {
       createRpcRequest("startAllDeviceClientWatchers", {})
     );
     await nextTick();
-    await host.handleControlRpc(
+    const stopping = host.handleControlRpc(
       1,
       createRpcRequest("stopAllDeviceClientWatchers", {})
     );
 
-    deferred.resolve([device]);
-    await starting;
+    deferred.resolve();
+    await Promise.all([starting, stopping]);
 
-    assert.deepStrictEqual(physical.startWatchClientCalls, []);
-    assert.strictEqual(device.state.startWatchCalls, 0);
-    assert.strictEqual(host.allClientWatchersRequested, false);
+    assert.deepStrictEqual(physical.startWatchClientCalls, ["device-1"]);
+    assert.strictEqual(device.state.startWatchCalls, 1);
+    assert.strictEqual(device.state.stopWatchCalls, 1);
+    assert.deepStrictEqual(Array.from(host.clientWatcherStartedDeviceIds), []);
   });
 
   it("routes sendMessageWithReply and sendMessageWithoutReply RPCs through Host", async function () {

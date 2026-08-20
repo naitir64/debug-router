@@ -20,8 +20,8 @@ const {
   waitForSocketMessage,
 } = require("./helpers/integration_harness");
 const {
-  WebSocketClient,
-} = require("../../../debug_router_connector/dist/cjs/src/websocket/WebSocketConnection");
+  MultiplexerWebSocketClient,
+} = require("../../../debug_router_connector/dist/cjs/src/multiplexer/client/MultiplexerWebSocketClient");
 
 describe("multiplexer integration WiFi runtime ideal behavior", function () {
   this.timeout(platformTimeout(12000));
@@ -57,21 +57,8 @@ describe("multiplexer integration WiFi runtime ideal behavior", function () {
     assert.strictEqual(listed.info.network, "WiFi");
     assert.strictEqual(listed.info.app, "wifi-runtime-list");
 
-    const driverProxy = await waitFor(
-      () => webConnected.find((client) => clientIdOf(client) === driver.id),
-      2000
-    );
-    // Let the daemon's automatic lifecycle ClientList broadcasts settle before
-    // proving that this explicit compatibility call causes a fresh delivery.
-    await delay(100);
-    const previousClientListCount = driver.messages.filter(
-      (message) => message?.event === "ClientList"
-    ).length;
-    driverProxy.handleListClients();
     await waitFor(
-      () =>
-        driver.messages.filter((message) => message?.event === "ClientList")
-          .length > previousClientListCount,
+      () => webConnected.find((client) => clientIdOf(client) === driver.id),
       2000
     );
     await connector.close();
@@ -108,7 +95,10 @@ describe("multiplexer integration WiFi runtime ideal behavior", function () {
     const connectedClient = firstSpecific.find(
       (client) => clientIdOf(client) === runtime.id
     );
-    assert.strictEqual(connectedClient instanceof WebSocketClient, true);
+    assert.strictEqual(
+      connectedClient instanceof MultiplexerWebSocketClient,
+      true
+    );
     assert.strictEqual(
       typeof connectedClient.clientId,
       "function",
@@ -116,7 +106,10 @@ describe("multiplexer integration WiFi runtime ideal behavior", function () {
     );
     assert.strictEqual(connectedClient.type(), "runtime");
     assert.strictEqual(connectedClient.info.network, "WiFi");
-    assert.strictEqual(connectedClient.info, connectedClient.info);
+    const firstInfo = connectedClient.info;
+    const secondInfo = connectedClient.info;
+    assert.notStrictEqual(firstInfo, secondInfo);
+    assert.deepStrictEqual(firstInfo, secondInfo);
     assert.strictEqual(
       typeof connectedClient.sendCustomizedMessage,
       "function"
