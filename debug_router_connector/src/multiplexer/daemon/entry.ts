@@ -17,9 +17,9 @@ const ENTRY_CLEANUP_TIMEOUT = 3000;
 export type MultiplexerDaemonEntryOption = {
   controlEndpoint: string;
   protocolVersion: number;
+  multiplexerDaemonIdleTimeout: number;
   debugInfo?: MultiplexerDebugInfo;
   legacyDriverDir?: string;
-  multiplexerDaemonIdleTimeout?: number;
   enableWebSocket?: boolean;
   connectionTrace?: ConnectionTraceOptions;
   websocketOption?: {
@@ -69,17 +69,15 @@ export function parseEntryOption(argv: string[]): MultiplexerDaemonEntryOption {
   const option: MultiplexerDaemonEntryOption = {
     controlEndpoint: getRequiredArg(rawArgs, "controlEndpoint"),
     protocolVersion: Number(getRequiredArg(rawArgs, "protocolVersion")),
+    multiplexerDaemonIdleTimeout: Number(
+      getRequiredArg(rawArgs, "multiplexerDaemonIdleTimeout"),
+    ),
   };
   if (rawArgs.debugInfo !== undefined) {
     option.debugInfo = JSON.parse(rawArgs.debugInfo) as MultiplexerDebugInfo;
   }
   if (rawArgs.legacyDriverDir !== undefined) {
     option.legacyDriverDir = rawArgs.legacyDriverDir;
-  }
-  if (rawArgs.multiplexerDaemonIdleTimeout !== undefined) {
-    option.multiplexerDaemonIdleTimeout = Number(
-      rawArgs.multiplexerDaemonIdleTimeout,
-    );
   }
   if (rawArgs.enableWebSocket !== undefined) {
     option.enableWebSocket = rawArgs.enableWebSocket === "true";
@@ -118,15 +116,11 @@ function createDaemonHost(
   const hostOption: MultiplexerDaemonHostOption = {
     controlEndpoint: entryOption.controlEndpoint,
     protocolVersion: entryOption.protocolVersion,
+    multiplexerDaemonIdleTimeout: entryOption.multiplexerDaemonIdleTimeout,
     ...(entryOption.debugInfo ? { debugInfo: entryOption.debugInfo } : {}),
   };
   if (entryOption.legacyDriverDir !== undefined) {
     Object.assign(hostOption, { legacyDriverDir: entryOption.legacyDriverDir });
-  }
-  if (entryOption.multiplexerDaemonIdleTimeout !== undefined) {
-    Object.assign(hostOption, {
-      multiplexerDaemonIdleTimeout: entryOption.multiplexerDaemonIdleTimeout,
-    });
   }
   if (entryOption.enableWebSocket !== undefined) {
     Object.assign(hostOption, { enableWebSocket: entryOption.enableWebSocket });

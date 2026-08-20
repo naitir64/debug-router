@@ -78,6 +78,8 @@ function createOption(tempDir, overrides = {}) {
     controlEndpoint:
       overrides.controlEndpoint ?? path.join(tempDir, "control.sock"),
     protocolVersion: overrides.protocolVersion ?? 1,
+    multiplexerDaemonIdleTimeout:
+      overrides.multiplexerDaemonIdleTimeout ?? -1,
     ...overrides,
   };
 }
@@ -119,12 +121,15 @@ describe("multiplexer daemon entry", function () {
         "/tmp/control.sock",
         "--protocol-version",
         "1",
+        "--multiplexer-daemon-idle-timeout",
+        "-1",
         "--debug-info",
         '{"daemonVersion":"1.2.3"}',
       ]),
       {
         controlEndpoint: "/tmp/control.sock",
         protocolVersion: 1,
+        multiplexerDaemonIdleTimeout: -1,
         debugInfo: { daemonVersion: "1.2.3" },
       }
     );
@@ -192,6 +197,16 @@ describe("multiplexer daemon entry", function () {
       () => parseEntryOption([]),
       /Missing required multiplexer daemon option: controlEndpoint/
     );
+    assert.throws(
+      () =>
+        parseEntryOption([
+          "--control-endpoint",
+          "/tmp/control.sock",
+          "--protocol-version",
+          "1",
+        ]),
+      /Missing required multiplexer daemon option: multiplexerDaemonIdleTimeout/
+    );
   });
 
   it("rejects unsupported argument forms and malformed JSON", function () {
@@ -200,6 +215,8 @@ describe("multiplexer daemon entry", function () {
       "/tmp/control.sock",
       "--protocol-version",
       "1",
+      "--multiplexer-daemon-idle-timeout",
+      "-1",
     ];
     assert.throws(() => parseEntryOption([...base, "--debug-info", "{"]));
     assert.throws(
@@ -226,6 +243,7 @@ describe("multiplexer daemon entry", function () {
       assert.deepStrictEqual(FakeDaemonHost.instances[0].option, {
         controlEndpoint: option.controlEndpoint,
         protocolVersion: 3,
+        multiplexerDaemonIdleTimeout: -1,
         debugInfo: { daemonVersion: "3" },
         enableWebSocket: true,
         physicalConnectorOption: { enableAndroid: true },
@@ -256,6 +274,8 @@ describe("multiplexer daemon entry", function () {
         option.controlEndpoint,
         "--protocol-version",
         String(option.protocolVersion),
+        "--multiplexer-daemon-idle-timeout",
+        String(option.multiplexerDaemonIdleTimeout),
       ]);
       assert.strictEqual(host, FakeDaemonHost.instances[0]);
       assert.strictEqual(FakeDaemonHost.instances[0].startCalls, 1);
@@ -294,6 +314,8 @@ describe("multiplexer daemon entry", function () {
             option.controlEndpoint,
             "--protocol-version",
             String(option.protocolVersion),
+            "--multiplexer-daemon-idle-timeout",
+            String(option.multiplexerDaemonIdleTimeout),
           ]);
 
           await (kind === "idle" ? host.idleHandler() : host.shutdownHandler());
@@ -323,6 +345,8 @@ describe("multiplexer daemon entry", function () {
         option.controlEndpoint,
         "--protocol-version",
         String(option.protocolVersion),
+        "--multiplexer-daemon-idle-timeout",
+        String(option.multiplexerDaemonIdleTimeout),
       ]);
 
       await host.idleHandler();
@@ -350,6 +374,8 @@ describe("multiplexer daemon entry", function () {
             option.controlEndpoint,
             "--protocol-version",
             String(option.protocolVersion),
+            "--multiplexer-daemon-idle-timeout",
+            String(option.multiplexerDaemonIdleTimeout),
           ]),
         /entry host failed/
       );

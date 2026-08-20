@@ -17,6 +17,9 @@ const {
 const {
   Client,
 } = require("../../../../debug_router_connector/dist/cjs/src/connector/Client");
+const {
+  WebSocketClient,
+} = require("../../../../debug_router_connector/dist/cjs/src/websocket/WebSocketConnection");
 
 function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -142,42 +145,6 @@ describe("multiplexer client mirror sync", function () {
     assert.strictEqual(device.isConnected, true);
   });
 
-  it("updates a MultiplexerDevice snapshot, restores connection state, and rejects serial mismatches", function () {
-    const daemonClient = createDaemonClient();
-    const device = MultiplexerDevice.fromSnapshot(
-      createDeviceSnapshot({
-        host: "10.0.0.1",
-      }),
-      daemonClient
-    );
-    device.disConnect();
-    device.updateFromSnapshot(
-      createDeviceSnapshot({
-        title: "Pixel 2",
-        ports: [9101],
-        host: undefined,
-      })
-    );
-
-    assert.deepStrictEqual(device.info, {
-      os: "Android",
-      title: "Pixel 2",
-      serial: "device-1",
-    });
-    assert.deepStrictEqual(device.ports, [9101]);
-    assert.strictEqual(device.getHost(), "127.0.0.1");
-    assert.strictEqual(device.isConnected, true);
-    assert.throws(
-      () =>
-        device.updateFromSnapshot(
-          createDeviceSnapshot({
-            serial: "other-device",
-          })
-        ),
-      /Cannot update multiplexer device device-1/
-    );
-  });
-
   it("forwards MultiplexerDevice public watcher APIs to daemon RPC", async function () {
     const daemonClient = createDaemonClient();
     const device = MultiplexerDevice.fromSnapshot(
@@ -232,7 +199,7 @@ describe("multiplexer client mirror sync", function () {
     );
   });
 
-  it("builds and updates MultiplexerUsbClient snapshots without sharing mutable info", function () {
+  it("builds a MultiplexerUsbClient snapshot without sharing mutable info", function () {
     const daemonClient = createDaemonClient();
     const snapshot = createClientSnapshot({
       rawInfo: {
@@ -250,32 +217,6 @@ describe("multiplexer client mirror sync", function () {
     assert.deepStrictEqual(client.info.query.raw_info, {
       App: "Demo",
     });
-
-    client.updateFromSnapshot(
-      createClientSnapshot({
-        id: 1,
-        port: 9100,
-        deviceId: "device-2",
-        rawInfo: {
-          App: "Updated",
-        },
-      })
-    );
-
-    assert.strictEqual(client.deviceId(), "device-2");
-    assert.strictEqual(client.info.port, 9100);
-    assert.deepStrictEqual(client.info.query.raw_info, {
-      App: "Updated",
-    });
-    assert.throws(
-      () =>
-        client.updateFromSnapshot(
-          createClientSnapshot({
-            id: 2,
-          })
-        ),
-      /Cannot update multiplexer USB client 1/
-    );
   });
 
   it("forwards MultiplexerUsbClient send and close APIs to daemon RPC", async function () {
@@ -482,7 +423,7 @@ describe("multiplexer client mirror sync", function () {
     );
   });
 
-  it("builds and updates WebSocket client snapshots without sharing mutable info", function () {
+  it("builds a WebSocket client snapshot through parent info", function () {
     const daemonClient = createDaemonClient();
     const snapshot = createWebSocketClientSnapshot({
       rawInfo: { App: "Original" },
@@ -494,31 +435,13 @@ describe("multiplexer client mirror sync", function () {
 
     snapshot.raw_info.App = "Changed";
     const info = client.info;
-    info.raw_info.App = "Mutated";
-    info.externalMarker = "keep-me";
 
     assert.strictEqual(client instanceof Client, true);
+    assert.strictEqual(client instanceof WebSocketClient, true);
     assert.strictEqual(client.clientId(), 100);
     assert.strictEqual(client.type(), "runtime");
-    assert.notStrictEqual(client.info, info);
+    assert.strictEqual(client.info, info);
     assert.deepStrictEqual(client.info.raw_info, { App: "Original" });
-
-    client.updateFromSnapshot(
-      createWebSocketClientSnapshot({
-        id: 100,
-        app: "updated",
-        rawInfo: { App: "Updated" },
-      })
-    );
-    assert.notStrictEqual(client.info, info);
-    assert.strictEqual(client.info.app, "updated");
-    assert.deepStrictEqual(client.info.raw_info, { App: "Updated" });
-    assert.strictEqual(client.info.externalMarker, undefined);
-    assert.throws(
-      () =>
-        client.updateFromSnapshot(createWebSocketClientSnapshot({ id: 101 })),
-      /Cannot update multiplexer WebSocket client 100/
-    );
   });
 
   it("forwards MultiplexerWebSocketClient compatibility APIs to daemon RPC", async function () {

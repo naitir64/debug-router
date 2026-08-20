@@ -54,8 +54,12 @@ function createClient(overrides = {}) {
         device: overrides.device ?? "Pixel",
         device_model: overrides.deviceModel ?? "Pixel",
         device_id: overrides.deviceId ?? "device-1",
-        sdk_version: overrides.sdkVersion,
-        raw_info: overrides.rawInfo,
+        ...(overrides.sdkVersion === undefined
+          ? {}
+          : { sdk_version: overrides.sdkVersion }),
+        ...(overrides.rawInfo === undefined
+          ? {}
+          : { raw_info: overrides.rawInfo }),
       },
     },
     clientId() {
@@ -85,7 +89,7 @@ class FakePhysicalConnector {
       clients.map((client) => [client.clientId(), client])
     );
     this.listeners = new Map();
-    this.connectDevicesCalls = [];
+    this.connectDevicesCalls = 0;
     this.startWatchCalls = [];
     this.closeCalls = 0;
     this.disableAllClientsCalls = 0;
@@ -107,7 +111,7 @@ class FakePhysicalConnector {
   }
 
   async connectDevices(timeout, serial) {
-    this.connectDevicesCalls.push({ timeout, serial });
+    this.connectDevicesCalls++;
     return this.getDevices(timeout, serial);
   }
 
@@ -177,6 +181,7 @@ describe("MultiplexerDaemonHost mirror stage", function () {
     host = new MultiplexerDaemonHost({
       controlEndpoint: path.join(tempDir, "control.sock"),
       protocolVersion: 1,
+      multiplexerDaemonIdleTimeout: -1,
       legacyDriverDir: path.join(tempDir, "legacy"),
       physicalConnector: physical,
       now: () => 1234,
@@ -193,7 +198,8 @@ describe("MultiplexerDaemonHost mirror stage", function () {
     assert.deepStrictEqual(await host.getDevices(), []);
   });
 
-  it("reacquires ownership, discovers devices, and starts current watchers", async function () {
+  it("discovers devices while unattached without reacquiring ownership", async function () {
+    host.legacyOwnershipGuard.currentStatus = "unattached";
     const snapshots = await host.handleControlRpc(
       1,
       rpc(1, "connectDevices", {
@@ -203,10 +209,9 @@ describe("MultiplexerDaemonHost mirror stage", function () {
       })
     );
 
-    assert.deepStrictEqual(physical.connectDevicesCalls, [
-      { timeout: -1, serial: null },
-    ]);
-    assert.deepStrictEqual(physical.startWatchCalls, ["device-1"]);
+    assert.strictEqual(physical.connectDevicesCalls, 1);
+    assert.strictEqual(host.legacyOwnershipGuard.currentStatus, "unattached");
+    assert.deepStrictEqual(physical.startWatchCalls, []);
     assert.deepStrictEqual(snapshots, [
       {
         os: "Android",
@@ -216,10 +221,65 @@ describe("MultiplexerDaemonHost mirror stage", function () {
         host: "127.0.0.1",
       },
     ]);
+    const newDevice = createDevice({ serial: "device-2" });
+    physical.devices.set(newDevice.serial, newDevice);
+    host.handleDeviceConnected(newDevice);
+    assert.deepStrictEqual(physical.startWatchCalls, []);
     assert.strictEqual(host.getDevices instanceof Function, true);
   });
 
+  it("reacquires ownership and starts existing watchers explicitly", async function () {
+    await host.handleControlRpc(
+      1,
+      rpc(1, "startAllDeviceClientWatchers", {})
+    );
+
+    assert.strictEqual(host.legacyOwnershipGuard.currentStatus, "attached");
+    assert.strictEqual(physical.connectDevicesCalls, 0);
+    assert.deepStrictEqual(physical.startWatchCalls, ["device-1"]);
+  });
+
+  it("automatically watches newly connected devices by default", async function () {
+    host.legacyOwnershipGuard.reacquire();
+    await host.handleControlRpc(
+      1,
+      rpc(1, "connectDevices", { isAutoListenClients: false })
+    );
+    const newDevice = createDevice({ serial: "device-2" });
+    physical.devices.set(newDevice.serial, newDevice);
+
+    host.handleDeviceConnected(newDevice);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepStrictEqual(physical.startWatchCalls, ["device-2"]);
+  });
+
+  it("does not automatically watch devices in manual connect mode", async function () {
+    host = new MultiplexerDaemonHost({
+      controlEndpoint: path.join(tempDir, "control.sock"),
+      protocolVersion: 1,
+      multiplexerDaemonIdleTimeout: -1,
+      legacyDriverDir: path.join(tempDir, "legacy"),
+      physicalConnector: physical,
+      physicalConnectorOption: { manualConnect: true },
+      now: () => 1234,
+    });
+    host.legacyOwnershipGuard.reacquire();
+    await host.handleControlRpc(
+      1,
+      rpc(1, "connectDevices", { isAutoListenClients: true })
+    );
+    const newDevice = createDevice({ serial: "device-2" });
+    physical.devices.set(newDevice.serial, newDevice);
+
+    host.handleDeviceConnected(newDevice);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepStrictEqual(physical.startWatchCalls, []);
+  });
+
   it("connects USB clients and serializes authoritative snapshots", async function () {
+    host.legacyOwnershipGuard.reacquire();
     await host.handleControlRpc(
       1,
       rpc(1, "connectDevices", { isAutoListenClients: false })
@@ -234,6 +294,7 @@ describe("MultiplexerDaemonHost mirror stage", function () {
       })
     );
 
+    assert.strictEqual(physical.connectDevicesCalls, 1);
     assert.deepStrictEqual(snapshots, [
       {
         port: 9001,
@@ -264,7 +325,31 @@ describe("MultiplexerDaemonHost mirror stage", function () {
     });
   });
 
-  it("forwards watcher, message, close, and disconnect RPCs", async function () {
+  it("returns no USB clients when the device does not exist", async function () {
+    host.legacyOwnershipGuard.currentStatus = "unattached";
+
+    const snapshots = await host.handleControlRpc(
+      1,
+      rpc(1, "connectUsbClients", {
+        deviceId: "missing-device",
+        timeout: 10,
+        waitTimeout: true,
+        clientName: null,
+      })
+    );
+
+    await host.handleControlRpc(
+      1,
+      rpc(2, "startDeviceClientWatcher", { deviceId: "missing-device" })
+    );
+
+    assert.deepStrictEqual(snapshots, []);
+    assert.strictEqual(physical.connectDevicesCalls, 0);
+    assert.deepStrictEqual(physical.startWatchCalls, []);
+  });
+
+  it("forwards watcher, close, and disconnect RPCs", async function () {
+    host.legacyOwnershipGuard.reacquire();
     await host.handleControlRpc(
       1,
       rpc(1, "connectDevices", { isAutoListenClients: false })
@@ -277,82 +362,79 @@ describe("MultiplexerDaemonHost mirror stage", function () {
       1,
       rpc(3, "stopDeviceClientWatcher", { deviceId: "device-1" })
     );
-    const request = { event: "Customized", data: { data: { message: {} } } };
-    const response = await host.handleControlRpc(
-      1,
-      rpc(4, "sendMessageWithReply", { clientId: 7, message: request })
-    );
+    await host.handleControlRpc(1, rpc(4, "closeClient", { clientId: 7 }));
     await host.handleControlRpc(
       1,
-      rpc(5, "sendMessageWithoutReply", {
-        target: "app",
-        clientId: 7,
-        message: "fire-and-forget",
-      })
-    );
-    await host.handleControlRpc(1, rpc(6, "closeClient", { clientId: 7 }));
-    await host.handleControlRpc(
-      1,
-      rpc(7, "disconnectDevice", { deviceId: "device-1" })
+      rpc(5, "disconnectDevice", { deviceId: "device-1" })
     );
 
-    assert.deepStrictEqual(response, {
-      event: "Customized",
-      data: { data: { message: "ok" } },
-    });
-    assert.deepStrictEqual(client.state.rawCalls, [request]);
-    assert.deepStrictEqual(client.state.messageCalls, ["fire-and-forget"]);
+    assert.strictEqual(physical.connectDevicesCalls, 1);
     assert.strictEqual(client.state.closeCalls, 1);
     assert.strictEqual(device.stopWatchCalls, 1);
     assert.strictEqual(device.disconnectCalls, 1);
   });
 
-  it("keeps MR6 WebSocket routing outside this stage", async function () {
-    await assert.rejects(
-      host.handleControlRpc(1, rpc(1, "startWSServer", {})),
-      (error) => error.code === "websocket-disabled"
+  it("leaves later routing RPCs unimplemented in this stage", async function () {
+    assert.strictEqual(
+      await host.handleControlRpc(1, rpc(1, "startWSServer", {})),
+      undefined
     );
-    await assert.rejects(
-      host.handleControlRpc(
+    assert.strictEqual(
+      await host.handleControlRpc(
         1,
-        rpc(2, "sendMessageWithoutReply", {
+        rpc(2, "sendMessageWithReply", {
+          clientId: 7,
+          message: { event: "Customized", data: { data: { message: {} } } },
+        })
+      ),
+      undefined
+    );
+    assert.strictEqual(
+      await host.handleControlRpc(
+        1,
+        rpc(3, "sendMessageWithoutReply", {
           target: "web",
           clientId: 8,
           message: "message",
         })
       ),
-      (error) => error.code === "websocket-disabled"
+      undefined
     );
   });
 
-  it("publishes snapshots and USB messages through current control events", async function () {
+  it("publishes snapshots through current control events", async function () {
     const events = [];
     host.broadcast = (event) => events.push(event);
+    host.legacyOwnershipGuard.reacquire();
     await host.handleControlRpc(
       1,
       rpc(1, "connectDevices", { isAutoListenClients: false })
     );
     host.handleClientConnected(client);
-    host.handleUsbClientMessage({ id: 7, message: "runtime-event" });
 
     assert.strictEqual(events[0].event, "legacy-ownership-changed");
     assert.strictEqual(events[1].event, "snapshot");
-    assert.deepStrictEqual(events[2], {
-      kind: "event",
-      event: "client-message",
-      data: {
-        source: "usb-runtime",
-        id: 7,
-        message: "runtime-event",
-      },
-    });
   });
 
   it("clears physical mirrors when legacy ownership is lost", async function () {
-    await host.handleControlRpc(
-      1,
-      rpc(1, "connectDevices", { isAutoListenClients: false })
-    );
+    const traceNodes = [];
+    host = new MultiplexerDaemonHost({
+      controlEndpoint: path.join(tempDir, "control.sock"),
+      protocolVersion: 1,
+      multiplexerDaemonIdleTimeout: -1,
+      legacyDriverDir: path.join(tempDir, "legacy"),
+      physicalConnector: physical,
+      connectionTrace: {
+        enabled: true,
+        output: {
+          write(line) {
+            traceNodes.push(JSON.parse(line));
+          },
+        },
+      },
+      now: () => 1234,
+    });
+    await host.handleControlRpc(1, rpc(1, "startAllDeviceClientWatchers", {}));
     host.legacyOwnershipGuard.currentStatus = "unattached";
     host.handleLegacyOwnershipChanged({
       status: "unattached",
@@ -365,6 +447,23 @@ describe("MultiplexerDaemonHost mirror stage", function () {
     assert.strictEqual(physical.usbClients.size, 0);
     assert.deepStrictEqual(host.createSnapshot().devices, []);
     assert.deepStrictEqual(host.createSnapshot().clients, []);
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "legacy_ownership_attached")
+        .metadata,
+      {
+        ownerPid: process.pid,
+        reason: "reacquire-requested",
+      }
+    );
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "legacy_ownership_lost")
+        .metadata,
+      {
+        ownerPid: process.pid,
+        previousOwnerPid: process.pid + 1,
+        reason: "legacy-preempted",
+      }
+    );
   });
 
   it("tracks active controls and dispatches graceful shutdown once", async function () {
@@ -389,6 +488,103 @@ describe("MultiplexerDaemonHost mirror stage", function () {
     );
     await new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(shutdownCalls, 1);
+  });
+
+  it("records daemon, control, and shutdown trace lifecycle", async function () {
+    const traceNodes = [];
+    host = new MultiplexerDaemonHost({
+      controlEndpoint: path.join(tempDir, "control.sock"),
+      protocolVersion: 1,
+      multiplexerDaemonIdleTimeout: -1,
+      legacyDriverDir: path.join(tempDir, "legacy"),
+      physicalConnector: physical,
+      connectionTrace: {
+        enabled: true,
+        output: {
+          write(line) {
+            traceNodes.push(JSON.parse(line));
+          },
+        },
+      },
+      now: () => 1234,
+    });
+    host.setShutdownHandler(() => {});
+
+    await host.start();
+    host.handleControlConnected(3);
+    host.handleControlDisconnected(3);
+    await host.handleControlRpc(
+      3,
+      rpc(1, "shutdownDaemon", { reason: "test" })
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await host.stop();
+
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "daemon_started").metadata,
+      {
+        pid: process.pid,
+        controlEndpoint: path.join(tempDir, "control.sock"),
+        protocolVersion: 1,
+      }
+    );
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "control_socket_connected")
+        .metadata,
+      { controlId: 3, activeControlCount: 1 }
+    );
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "control_socket_disconnected")
+        .metadata,
+      { controlId: 3, activeControlCount: 0 }
+    );
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "daemon_shutdown_requested")
+        .metadata,
+      { reason: "test" }
+    );
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "daemon_stopped").metadata,
+      { pid: process.pid, reason: "test" }
+    );
+  });
+
+  it("records idle timeout trace and stop reason", async function () {
+    const traceNodes = [];
+    host = new MultiplexerDaemonHost({
+      controlEndpoint: path.join(tempDir, "control.sock"),
+      protocolVersion: 1,
+      legacyDriverDir: path.join(tempDir, "legacy"),
+      physicalConnector: physical,
+      multiplexerDaemonIdleTimeout: 0,
+      connectionTrace: {
+        enabled: true,
+        output: {
+          write(line) {
+            traceNodes.push(JSON.parse(line));
+          },
+        },
+      },
+      now: () => 1234,
+    });
+    const idleReached = new Promise((resolve) => {
+      host.setIdleTimeoutHandler(resolve);
+    });
+
+    await host.start();
+    await idleReached;
+    await host.stop();
+
+    assert.deepStrictEqual(
+      traceNodes.find(
+        (node) => node.event === "daemon_idle_timeout_reached"
+      ).metadata,
+      { idleTimeout: 0 }
+    );
+    assert.deepStrictEqual(
+      traceNodes.find((node) => node.event === "daemon_stopped").metadata,
+      { pid: process.pid, reason: "idle_timeout" }
+    );
   });
 
   it("starts and stops the fixed endpoint with injected physical resources", async function () {

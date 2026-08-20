@@ -181,6 +181,50 @@ export class ConnectionTraceRecorder {
     this.recordNode("client_watch_stopped", deviceId, metadata);
   }
 
+  recordDaemonStarted(metadata?: Record<string, any>): void {
+    this.recordNode("daemon_started", undefined, metadata);
+  }
+
+  recordDaemonStopped(metadata?: Record<string, any>): void {
+    this.recordNode("daemon_stopped", undefined, metadata);
+  }
+
+  recordDaemonShutdownRequested(metadata?: Record<string, any>): void {
+    this.recordNode("daemon_shutdown_requested", undefined, metadata);
+  }
+
+  recordDaemonIdleTimeoutReached(metadata?: Record<string, any>): void {
+    this.recordNode("daemon_idle_timeout_reached", undefined, metadata);
+  }
+
+  recordControlSocketConnected(
+    controlId: number,
+    metadata?: Record<string, any>,
+  ): void {
+    this.recordNode("control_socket_connected", undefined, {
+      controlId,
+      ...metadata,
+    });
+  }
+
+  recordControlSocketDisconnected(
+    controlId: number,
+    metadata?: Record<string, any>,
+  ): void {
+    this.recordNode("control_socket_disconnected", undefined, {
+      controlId,
+      ...metadata,
+    });
+  }
+
+  recordLegacyOwnershipAttached(metadata?: Record<string, any>): void {
+    this.recordNode("legacy_ownership_attached", undefined, metadata);
+  }
+
+  recordLegacyOwnershipLost(metadata?: Record<string, any>): void {
+    this.recordNode("legacy_ownership_lost", undefined, metadata);
+  }
+
   recordSocketConnected(
     deviceId: string,
     port: number,
