@@ -3,6 +3,8 @@
 // LICENSE file in the root directory of this source tree.
 
 const assert = require("assert");
+const { spawn: spawnChildProcess } = require("child_process");
+const { once } = require("events");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -77,25 +79,62 @@ function getArgumentValue(args, name) {
   return index === -1 ? undefined : args[index + 1];
 }
 
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function waitForChildExit(child, timeout = 2000) {
+  if (!child.pid) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
+  let timer;
+  try {
+    await Promise.race([
+      once(child, "exit"),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out waiting for child ${child.pid}`)),
+          timeout
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createManager(tempDir, values, overrides = {}) {
   const controlEndpoint = path.join(tempDir, "control.sock");
   const discovery =
     overrides.discovery ?? sequenceDiscovery(controlEndpoint, values);
   const spawnCalls = [];
+  const sleepCalls = [];
   let now = 0;
   const manager = new MultiplexerDaemonManager({
     discovery,
-    daemonProcessName: overrides.daemonProcessName ?? "test-muxDaemon",
+    daemonProcessName:
+      overrides.daemonProcessName ?? `${path.basename(tempDir)}-muxDaemon`,
     controlEndpoint,
     spawnLockPath: path.join(tempDir, "spawn.lock"),
     daemonEntry: "/tmp/entry.js",
     multiplexerDaemonIdleTimeout: overrides.multiplexerDaemonIdleTimeout ?? -1,
-    startupTimeout: 100,
-    readyPollInterval: 10,
-    replacementTimeout: 20,
+    startupTimeout: overrides.startupTimeout ?? 100,
+    readyPollInterval: overrides.readyPollInterval ?? 10,
+    replacementTimeout: overrides.replacementTimeout ?? 20,
     localProtocolVersion: 1,
     debugInfo: overrides.debugInfo,
     legacyDriverDir: overrides.legacyDriverDir,
+    enableWebSocket: overrides.enableWebSocket,
+    connectionTrace: overrides.connectionTrace,
+    websocketOption: overrides.websocketOption,
+    physicalConnectorOption: overrides.physicalConnectorOption,
     spawn(command, args, options) {
       const call = { command, args, options, unref: false };
       spawnCalls.push(call);
@@ -104,12 +143,15 @@ function createManager(tempDir, values, overrides = {}) {
     },
     kill: overrides.kill ?? (() => {}),
     isProcessAlive: overrides.isProcessAlive ?? (() => false),
-    sleep: async (duration) => {
-      now += duration;
-    },
-    now: () => now,
+    sleep:
+      overrides.sleep ??
+      (async (duration) => {
+        sleepCalls.push(duration);
+        now += duration;
+      }),
+    now: overrides.now ?? (() => now),
   });
-  return { manager, discovery, spawnCalls, controlEndpoint };
+  return { manager, discovery, spawnCalls, sleepCalls, controlEndpoint };
 }
 
 describe("MultiplexerDaemonManager", function () {
@@ -145,7 +187,7 @@ describe("MultiplexerDaemonManager", function () {
     assert.strictEqual(fs.existsSync(spawnLockPath), false);
   });
 
-  it("spawns once with the required endpoint and protocol args", async function () {
+  it("[v1 compatibility gate] spawns once with the required daemon contract", async function () {
     let spawned = false;
     const controlEndpoint = path.join(tempDir, "control.sock");
     const discovery = {
@@ -176,7 +218,60 @@ describe("MultiplexerDaemonManager", function () {
       "-1"
     );
     assert.strictEqual(spawnCalls[0].options.argv0, manager.daemonProcessName);
+    assert.strictEqual(spawnCalls[0].options.detached, true);
+    assert.strictEqual(spawnCalls[0].options.stdio, "ignore");
+    assert.strictEqual(spawnCalls[0].options.windowsHide, true);
     assert.strictEqual(spawnCalls[0].unref, true);
+  });
+
+  it("[v1 compatibility gate] forwards optional daemon startup arguments", async function () {
+    const debugInfo = { clientVersion: "1.2.3" };
+    const connectionTrace = {
+      enabled: true,
+      output: "/tmp/multiplexer-trace.jsonl",
+      bufferSize: 32,
+    };
+    const physicalConnectorOption = {
+      manualConnect: true,
+      enableAndroid: false,
+    };
+    const { manager, spawnCalls } = createManager(tempDir, [usable()], {
+      debugInfo,
+      legacyDriverDir: "/tmp/legacy-driver",
+      multiplexerDaemonIdleTimeout: 4321,
+      enableWebSocket: false,
+      websocketOption: { port: 0, roomId: "" },
+      connectionTrace,
+      physicalConnectorOption,
+    });
+
+    await manager.spawnDaemon();
+
+    assert.strictEqual(spawnCalls.length, 1);
+    const args = spawnCalls[0].args;
+    assert.deepStrictEqual(
+      JSON.parse(getArgumentValue(args, "--debug-info")),
+      debugInfo
+    );
+    assert.strictEqual(
+      getArgumentValue(args, "--legacy-driver-dir"),
+      "/tmp/legacy-driver"
+    );
+    assert.strictEqual(
+      getArgumentValue(args, "--multiplexer-daemon-idle-timeout"),
+      "4321"
+    );
+    assert.strictEqual(getArgumentValue(args, "--enable-websocket"), "false");
+    assert.strictEqual(getArgumentValue(args, "--websocket-port"), "0");
+    assert.strictEqual(getArgumentValue(args, "--websocket-room-id"), "");
+    assert.deepStrictEqual(
+      JSON.parse(getArgumentValue(args, "--connection-trace")),
+      connectionTrace
+    );
+    assert.deepStrictEqual(
+      JSON.parse(getArgumentValue(args, "--physical-connector-option")),
+      physicalConnectorOption
+    );
   });
 
   it("reuses a daemon that becomes usable during health retries", async function () {
@@ -186,6 +281,56 @@ describe("MultiplexerDaemonManager", function () {
     ]);
 
     assert.strictEqual(await manager.ensureDaemon(), undefined);
+    assert.deepStrictEqual(spawnCalls, []);
+  });
+
+  it("[v1 compatibility gate] retries every transient health failure", async function () {
+    for (const reason of [
+      "unreachable",
+      "timeout",
+      "invalid-frame",
+      "invalid-response",
+    ]) {
+      const caseDir = path.join(tempDir, reason);
+      fs.mkdirSync(caseDir);
+      const {
+        manager,
+        discovery,
+        spawnCalls,
+        sleepCalls,
+      } = createManager(caseDir, [unavailable(reason), usable()]);
+
+      await manager.ensureDaemon();
+
+      assert.strictEqual(discovery.calls, 2, reason);
+      assert.deepStrictEqual(sleepCalls, [10], reason);
+      assert.deepStrictEqual(spawnCalls, [], reason);
+    }
+  });
+
+  it("[v1 compatibility gate] performs only three delayed health retries", async function () {
+    const {
+      manager,
+      discovery,
+      spawnCalls,
+      sleepCalls,
+    } = createManager(tempDir, [
+      unavailable(),
+      unavailable("timeout"),
+      unavailable("invalid-frame"),
+      unavailable("invalid-response"),
+      usable(),
+    ]);
+    const owner = new FileLock(manager.spawnLock.lockPath);
+    assert.strictEqual(owner.acquire(), true);
+    try {
+      await manager.ensureDaemon();
+    } finally {
+      owner.release();
+    }
+
+    assert.strictEqual(discovery.calls, 5);
+    assert.deepStrictEqual(sleepCalls, [10, 10, 10]);
     assert.deepStrictEqual(spawnCalls, []);
   });
 
@@ -208,7 +353,7 @@ describe("MultiplexerDaemonManager", function () {
     }
   });
 
-  it("rejects when the daemon does not become ready before timeout", async function () {
+  it("reports the last validation and health error on readiness timeout", async function () {
     const lastError = new Error("last health probe failed");
     const { manager, discovery } = createManager(tempDir, [
       unavailable(),
@@ -216,7 +361,16 @@ describe("MultiplexerDaemonManager", function () {
       unavailable("invalid-frame", lastError),
     ]);
 
-    await assert.rejects(() => manager.waitUntilReady(20));
+    await assert.rejects(
+      () => manager.waitUntilReady(20),
+      (error) => {
+        assert.match(error.message, /Timed out waiting for multiplexer daemon/);
+        assert.match(error.message, /unusable\/invalid-frame/);
+        assert.match(error.message, /last health probe failed/);
+        return true;
+      }
+    );
+    assert.strictEqual(discovery.calls, 3);
   });
 
   it("waitUntilReady exits early when daemon replacement is required", async function () {
@@ -281,16 +435,42 @@ describe("MultiplexerDaemonManager", function () {
     assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
   });
 
+  it("releases spawn.lock when spawning throws", async function () {
+    const spawnError = new Error("spawn failed");
+    const { manager, spawnCalls } = createManager(tempDir, [], {
+      onSpawn() {
+        throw spawnError;
+      },
+    });
+
+    await assert.rejects(
+      () => manager.handleDiscoveryResult(unavailable()),
+      (error) => error === spawnError
+    );
+
+    assert.strictEqual(spawnCalls.length, 1);
+    assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
+  });
+
   it("[v1 compatibility gate] requests graceful shutdown for protocol replacement", async function () {
     const calls = [];
-    const { manager } = createManager(tempDir, [replaceRequired(), usable()]);
+    const { manager, discovery, spawnCalls } = createManager(tempDir, [
+      replaceRequired(),
+      usable(),
+    ]);
     manager.setDaemonClient({
       async call(method, params, ensureDaemon) {
         calls.push([method, params, ensureDaemon]);
         return {};
       },
     });
-    await manager.ensureDaemon();
+    const originalError = defaultLogger.error;
+    defaultLogger.error = () => {};
+    try {
+      await manager.ensureDaemon();
+    } finally {
+      defaultLogger.error = originalError;
+    }
     assert.deepStrictEqual(calls, [
       [
         "shutdownDaemon",
@@ -298,6 +478,96 @@ describe("MultiplexerDaemonManager", function () {
         false,
       ],
     ]);
+    assert.strictEqual(discovery.calls, 2);
+    assert.strictEqual(spawnCalls.length, 1);
+    assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
+  });
+
+  it("finds and stops a Unix daemon by its argv0 marker", async function () {
+    if (process.platform === "win32") this.skip();
+    this.timeout(5000);
+
+    const daemonProcessName = `${path.basename(tempDir)}-lookup-muxDaemon`;
+    const child = spawnChildProcess(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      {
+        argv0: daemonProcessName,
+        stdio: "ignore",
+      }
+    );
+
+    try {
+      await once(child, "spawn");
+      const { manager, controlEndpoint } = createManager(tempDir, [usable()], {
+        daemonProcessName,
+        replacementTimeout: 1000,
+        kill: (pid, signal) => process.kill(pid, signal),
+        isProcessAlive,
+        sleep: (duration) =>
+          new Promise((resolve) => setTimeout(resolve, duration)),
+        now: Date.now,
+      });
+      fs.writeFileSync(controlEndpoint, "stale");
+
+      await manager.tryGracefullyStopDaemon("force-stop");
+      await waitForChildExit(child);
+
+      assert.strictEqual(isProcessAlive(child.pid), false);
+      assert.strictEqual(fs.existsSync(controlEndpoint), false);
+    } finally {
+      if (isProcessAlive(child.pid)) child.kill("SIGKILL");
+      await waitForChildExit(child);
+    }
+  });
+
+  it("escalates to SIGKILL when the marked Unix daemon ignores SIGTERM", async function () {
+    if (process.platform === "win32") this.skip();
+    this.timeout(5000);
+
+    const daemonProcessName = `${path.basename(tempDir)}-stubborn-muxDaemon`;
+    const child = spawnChildProcess(
+      process.execPath,
+      [
+        "-e",
+        "process.on('SIGTERM', () => {}); " +
+          "process.send('ready'); setInterval(() => {}, 1000)",
+      ],
+      {
+        argv0: daemonProcessName,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      }
+    );
+    const signals = [];
+
+    try {
+      await once(child, "spawn");
+      await once(child, "message");
+      const { manager } = createManager(tempDir, [usable()], {
+        daemonProcessName,
+        replacementTimeout: 50,
+        kill: (pid, signal) => {
+          signals.push([pid, signal]);
+          process.kill(pid, signal);
+        },
+        isProcessAlive,
+        sleep: (duration) =>
+          new Promise((resolve) => setTimeout(resolve, duration)),
+        now: Date.now,
+      });
+
+      await manager.tryGracefullyStopDaemon("force-stop");
+      await waitForChildExit(child);
+
+      assert.deepStrictEqual(signals, [
+        [child.pid, "SIGTERM"],
+        [child.pid, "SIGKILL"],
+      ]);
+      assert.strictEqual(child.signalCode, "SIGKILL");
+    } finally {
+      if (isProcessAlive(child.pid)) child.kill("SIGKILL");
+      await waitForChildExit(child);
+    }
   });
 
   it("reports and returns when graceful shutdown cannot find a daemon pid", async function () {

@@ -2,9 +2,11 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
+import { EventEmitter } from "events";
 import { Client } from "../../connector/Client";
 import { defaultLogger } from "../../utils/logger";
 import { RequireMessageType, SocketEvent } from "../../utils/type";
+import { WebSocketClient } from "../../websocket/WebSocketConnection";
 import type { WebSocketClientSnapshot } from "../protocol";
 import { MultiplexerDaemonClient } from "./MultiplexerDaemonClient";
 
@@ -13,18 +15,13 @@ export type MultiplexerWebSocketClientOption = {
   daemonClient: MultiplexerDaemonClient;
 };
 
-export class MultiplexerWebSocketClient extends Client {
-  private snapshot: WebSocketClientSnapshot;
+export class MultiplexerWebSocketClient extends WebSocketClient {
   private readonly daemonClient: MultiplexerDaemonClient;
 
   constructor(option: MultiplexerWebSocketClientOption) {
-    super();
-    this.snapshot = cloneSnapshot(option.snapshot);
+    const snapshot = cloneSnapshot(option.snapshot);
+    super({} as any, snapshot, new EventEmitter() as any);
     this.daemonClient = option.daemonClient;
-  }
-
-  get info(): WebSocketClientSnapshot {
-    return cloneSnapshot(this.snapshot);
   }
 
   static fromSnapshot(
@@ -37,23 +34,12 @@ export class MultiplexerWebSocketClient extends Client {
     });
   }
 
-  updateFromSnapshot(snapshot: WebSocketClientSnapshot): void {
-    if (snapshot.id !== this.clientId()) {
-      throw new Error(
-        `Cannot update multiplexer WebSocket client ${this.clientId()} with snapshot ${
-          snapshot.id
-        }`,
-      );
-    }
-    this.snapshot = cloneSnapshot(snapshot);
-  }
-
   clientId(): number {
-    return this.snapshot.id;
+    return this.info.id;
   }
 
   type(): string {
-    return this.snapshot.type;
+    return this.info.type;
   }
 
   close(): void {

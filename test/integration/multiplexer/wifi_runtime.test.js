@@ -108,8 +108,7 @@ describe("multiplexer integration WiFi runtime ideal behavior", function () {
     assert.strictEqual(connectedClient.info.network, "WiFi");
     const firstInfo = connectedClient.info;
     const secondInfo = connectedClient.info;
-    assert.notStrictEqual(firstInfo, secondInfo);
-    assert.deepStrictEqual(firstInfo, secondInfo);
+    assert.strictEqual(firstInfo, secondInfo);
     assert.strictEqual(
       typeof connectedClient.sendCustomizedMessage,
       "function"

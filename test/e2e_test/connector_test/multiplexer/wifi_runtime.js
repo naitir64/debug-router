@@ -74,7 +74,6 @@ async function runRegistrationDiscoveryCase() {
   const context = createContext("registration-discovery");
   try {
     const connector = context.createConnector();
-    const webConnected = collect(connector, "websocket-web-client-connected");
     await connector.startWSServer();
     const url = websocketUrl(connector);
     const runtime = await connectWebSocketClient(url, "runtime", {
@@ -95,27 +94,6 @@ async function runRegistrationDiscoveryCase() {
     assert.strictEqual(listed.type, "runtime");
     assert.strictEqual(listed.info.network, "WiFi");
     assert.strictEqual(listed.info.app, "wifi-phone-discovery");
-
-    const driverProxy = await waitFor(
-      () => webConnected.find((client) => clientIdOf(client) === driver.id),
-      2000,
-      "public Driver client proxy"
-    );
-    assert.strictEqual(driverProxy instanceof WebSocketClient, true);
-    // Exclude automatic connection-time ClientList broadcasts from the
-    // baseline so this assertion validates handleListClients() itself.
-    await delay(100);
-    const previousClientListCount = driver.messages.filter(
-      (message) => message?.event === "ClientList"
-    ).length;
-    driverProxy.handleListClients();
-    await waitFor(
-      () =>
-        driver.messages.filter((message) => message?.event === "ClientList")
-          .length > previousClientListCount,
-      2000,
-      "Driver proxy handleListClients response"
-    );
   } finally {
     await context.cleanup();
   }

@@ -179,19 +179,19 @@ export class MultiplexerDaemonManager {
 
     while (true) {
       const validation = await this.probeDaemonHealthWithRetry();
-      if (await this.ensureDaemonFromDiscoveryValidation(validation)) return;
+      if (await this.handleDiscoveryResult(validation)) return;
       // If another connector process has spawned an unavailable daemon, retry ensureDaemon.
     }
   }
 
-  async ensureDaemonFromDiscoveryValidation(
+  async handleDiscoveryResult(
     validation: MultiplexerDiscoveryValidation,
   ): Promise<boolean> {
     if (validation.status === "usable") {
       return true;
     }
     if (validation.status === "replace-required") {
-      return this.ensureDaemonWithSpawnLock(async () => {
+      return this.tryStartDaemon(async () => {
         await this.tryGracefullyStopDaemon(
           "daemon-protocol-older-than-connector",
         );
@@ -200,12 +200,12 @@ export class MultiplexerDaemonManager {
     if (isOlderDaemonInUse(validation)) {
       throw createOlderDaemonInUseError(validation);
     }
-    return this.ensureDaemonWithSpawnLock(async () => {
+    return this.tryStartDaemon(async () => {
       await this.forceStopDaemon();
     });
   }
 
-  private async ensureDaemonWithSpawnLock(
+  private async tryStartDaemon(
     beforeSpawn: () => void | Promise<void>,
   ): Promise<boolean> {
     if (!this.acquireSpawnLock()) {
@@ -282,7 +282,7 @@ export class MultiplexerDaemonManager {
       await this.waitUntilProcessExits(daemonPid, this.replacementTimeout);
     }
     if (this.isProcessAlive(daemonPid)) {
-      await this.forceStopDaemonProcess(daemonPid);
+      await this.forceStopProcess(daemonPid);
     }
     this.removeDaemonArtifacts();
   }
@@ -299,7 +299,7 @@ export class MultiplexerDaemonManager {
     );
   }
 
-  private async forceStopDaemonProcess(pid: number): Promise<void> {
+  private async forceStopProcess(pid: number): Promise<void> {
     const sigtermError = this.tryKillProcess(pid, "SIGTERM");
     if ((sigtermError as any)?.code === "ESRCH") {
       return;
@@ -329,7 +329,7 @@ export class MultiplexerDaemonManager {
   private async forceStopDaemon(): Promise<void> {
     const daemonPid = await this.findDaemonProcessId();
     if (daemonPid !== -1 && this.isProcessAlive(daemonPid)) {
-      await this.forceStopDaemonProcess(daemonPid);
+      await this.forceStopProcess(daemonPid);
     }
     this.removeDaemonArtifacts();
   }

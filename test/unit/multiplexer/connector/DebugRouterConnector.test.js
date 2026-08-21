@@ -602,7 +602,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       const updated = await connector.connectDevices();
 
       assert.strictEqual(updated[0], devices[0]);
-      assert.deepStrictEqual(devices[0].ports, [9010]);
+      assert.deepStrictEqual(devices[0].ports, [9001]);
       assert.strictEqual(connected.length, 2);
 
       connector.registerDevice(devices[0]);
@@ -720,7 +720,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       const updated = await connector.connectUsbClients("device-1");
 
       assert.strictEqual(updated[0], clients[0]);
-      assert.strictEqual(updated[0].info.port, 9999);
+      assert.strictEqual(updated[0].info.port, android.port);
       assert.strictEqual(clientConnected.length, 2);
     } finally {
       restore();

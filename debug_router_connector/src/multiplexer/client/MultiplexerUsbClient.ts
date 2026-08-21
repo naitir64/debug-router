@@ -26,7 +26,7 @@ export type MultiplexerUsbClientOption = {
 
 export class MultiplexerUsbClient extends Client {
   private readonly events = new EventEmitter();
-  private snapshot: ClientSnapshot;
+  private readonly snapshot: ClientSnapshot;
   private readonly daemonClient: MultiplexerDaemonClient;
 
   constructor(option: MultiplexerUsbClientOption) {
@@ -47,18 +47,6 @@ export class MultiplexerUsbClient extends Client {
 
   get info(): ClientDescription {
     return cloneClientSnapshot(this.snapshot);
-  }
-
-  updateFromSnapshot(snapshot: ClientSnapshot): void {
-    if (snapshot.id !== this.clientId()) {
-      throw new Error(
-        `Cannot update multiplexer USB client ${this.clientId()} with snapshot ${
-          snapshot.id
-        }`,
-      );
-    }
-
-    this.snapshot = cloneClientSnapshot(snapshot);
   }
 
   clientId(): number {

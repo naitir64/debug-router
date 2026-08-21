@@ -123,13 +123,13 @@ describe("multiplexer FileLock", function () {
 
   it("keeps different lock paths independent", function () {
     const spawnLock = new FileLock(path.join(tempDir, "spawn.lock"));
-    const daemonLock = new FileLock(path.join(tempDir, "daemon.lock"));
+    const secondLock = new FileLock(path.join(tempDir, "second.lock"));
 
     assert.strictEqual(spawnLock.acquire(), true);
-    assert.strictEqual(daemonLock.acquire(), true);
+    assert.strictEqual(secondLock.acquire(), true);
 
     spawnLock.release();
-    daemonLock.release();
+    secondLock.release();
   });
 
   it("returns null for missing, invalid JSON, and invalid owner shape", function () {
@@ -201,7 +201,7 @@ describe("multiplexer FileLock", function () {
 
     fs.mkdirSync(staleLockPath);
     writeLockOwner(staleLockPath, {
-      pid: 1,
+      pid: process.pid,
       createdAt: now - 5000,
     });
 
@@ -289,7 +289,7 @@ describe("multiplexer FileLock", function () {
     assert.strictEqual(fs.existsSync(lockPath), false);
   });
 
-  it("keeps local state until release after cleaning a stale lock", function () {
+  it("does not remove a replacement owner after cleaning its stale lock", function () {
     const now = Date.now();
     const lockPath = path.join(tempDir, "owned-stale.lock");
     const lock = new FileLock(lockPath);
@@ -302,50 +302,26 @@ describe("multiplexer FileLock", function () {
     });
 
     assert.strictEqual(lock.cleanupStale(1000, now), true);
-    assert.strictEqual(lock.isLocked(), true);
     assert.strictEqual(fs.existsSync(lockPath), false);
+
+    const replacement = new FileLock(lockPath);
+    assert.strictEqual(replacement.acquire(), true);
+    const replacementOwner = replacement.readOwner();
+
     lock.release();
     assert.strictEqual(lock.isLocked(), false);
-  });
-
-  it("try removes locks without changing local ownership state", function () {
-    const liveLockPath = path.join(tempDir, "try-live.lock");
-    const localLockPath = path.join(tempDir, "try-local.lock");
-
-    const liveLock = new FileLock(liveLockPath);
-    assert.strictEqual(liveLock.acquire(), true);
-    const liveOwner = liveLock.readOwner();
-    assert.strictEqual(liveLock.tryRemove(liveOwner), true);
-    assert.strictEqual(liveLock.isLocked(), true);
-    assert.strictEqual(fs.existsSync(liveLockPath), false);
-    assert.strictEqual(liveOwner.pid, process.pid);
-    assert.strictEqual(typeof liveOwner.token, "string");
-    liveLock.release();
-    assert.strictEqual(liveLock.isLocked(), false);
-
-    const localLock = new FileLock(localLockPath);
-    assert.strictEqual(localLock.acquire(), true);
-    assert.strictEqual(localLock.tryRemove(localLock.readOwner()), true);
-    assert.strictEqual(localLock.isLocked(), true);
-    assert.strictEqual(fs.existsSync(localLockPath), false);
-    localLock.release();
-    assert.strictEqual(localLock.isLocked(), false);
-
-    assert.strictEqual(
-      new FileLock(path.join(tempDir, "try-missing.lock")).tryRemove(null),
-      true
-    );
-  });
-
-  it("does not try remove when the expected owner does not match", function () {
-    const lockPath = path.join(tempDir, "try-guarded.lock");
-    const lock = new FileLock(lockPath);
-
-    assert.strictEqual(lock.acquire(), true);
-    assert.strictEqual(lock.tryRemove(null), false);
-    assert.strictEqual(lock.isLocked(), true);
+    assert.deepStrictEqual(replacement.readOwner(), replacementOwner);
     assert.strictEqual(fs.existsSync(lockPath), true);
+    replacement.release();
+  });
 
-    lock.release();
+  it("cleans an ownerless lock and treats missing locks as already clean", function () {
+    const lockPath = path.join(tempDir, "ownerless.lock");
+    const lock = new FileLock(lockPath);
+    fs.mkdirSync(lockPath);
+
+    assert.strictEqual(lock.cleanup(), true);
+    assert.strictEqual(fs.existsSync(lockPath), false);
+    assert.strictEqual(lock.cleanup(), true);
   });
 });

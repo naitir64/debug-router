@@ -15,7 +15,7 @@ export type MultiplexerDeviceOption = {
 };
 
 export class MultiplexerDevice {
-  private snapshot: DeviceSnapshot;
+  private readonly snapshot: DeviceSnapshot;
   private connected = true;
   private readonly daemonClient: MultiplexerDaemonClient;
 
@@ -56,17 +56,6 @@ export class MultiplexerDevice {
 
   getHost(): string {
     return this.snapshot.host ?? DEFAULT_DEVICE_HOST;
-  }
-
-  updateFromSnapshot(snapshot: DeviceSnapshot): void {
-    if (snapshot.serial !== this.serial) {
-      throw new Error(
-        `Cannot update multiplexer device ${this.serial} with snapshot ${snapshot.serial}`,
-      );
-    }
-
-    this.snapshot = cloneDeviceSnapshot(snapshot);
-    this.connected = true;
   }
 
   startWatchClient(): void {

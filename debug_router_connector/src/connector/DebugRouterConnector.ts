@@ -869,7 +869,6 @@ export class DebugRouterConnector {
   ): MultiplexerWebSocketClient {
     const existing = this.websocketAppClients.get(snapshot.id);
     if (existing) {
-      existing.updateFromSnapshot(snapshot);
       return existing;
     }
     const client = MultiplexerWebSocketClient.fromSnapshot(
@@ -890,7 +889,6 @@ export class DebugRouterConnector {
   ): MultiplexerWebSocketClient {
     const existing = this.websocketWebClients.get(snapshot.id);
     if (existing) {
-      existing.updateFromSnapshot(snapshot);
       return existing;
     }
     const client = MultiplexerWebSocketClient.fromSnapshot(
@@ -915,7 +913,6 @@ export class DebugRouterConnector {
   private upsertDeviceSnapshot(snapshot: DeviceSnapshot): MultiplexerDevice {
     const existing = this.devices.get(snapshot.serial);
     if (existing) {
-      existing.updateFromSnapshot(snapshot);
       return existing;
     }
 
@@ -973,7 +970,6 @@ export class DebugRouterConnector {
   private upsertClientSnapshot(snapshot: ClientSnapshot): MultiplexerUsbClient {
     const existing = this.usbClients.get(snapshot.id);
     if (existing) {
-      existing.updateFromSnapshot(snapshot);
       return existing;
     }
 
