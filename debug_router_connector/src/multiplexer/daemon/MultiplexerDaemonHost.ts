@@ -46,19 +46,13 @@ import {
 
 const DEFAULT_DEV_SERVE_PORT = 19783;
 
-export type PendingTargetSeed =
-  | {
-      kind: "control";
-      controlId: number;
-      clientId: number;
-      resolve?: (value: unknown) => void;
-      reject?: (error: Error) => void;
-    }
-  | {
-      kind: "websocket";
-      webClientId: number;
-      clientId: number;
-    };
+export type PendingTargetSeed = {
+  kind: "control" | "websocket";
+  requesterId: number;
+  clientId: number;
+  resolve?: (value: unknown) => void;
+  reject?: (error: Error) => void;
+};
 
 export type RoutedMessage = {
   target: PendingRoute;
@@ -618,7 +612,7 @@ export class MultiplexerDaemonHost {
   ): void {
     this.sendMessageToRuntime(targetClientId, message, {
       kind: "websocket",
-      webClientId,
+      requesterId: webClientId,
       clientId: targetClientId,
     });
   }
@@ -684,7 +678,7 @@ export class MultiplexerDaemonHost {
           // Connector facade events are a legacy compatibility surface.
           // externalMessage restores the caller's original request id without
           // exposing the sender/client_id rewrite used for Web routing.
-          this.sendToControl(routed.target.controlId, {
+          this.sendToControl(routed.target.requesterId, {
             kind: "event",
             event: "client-message",
             data: {
@@ -695,7 +689,10 @@ export class MultiplexerDaemonHost {
           });
         }
       } else {
-        this.sendMessageToWebClient(routed.target.webClientId, routed.message);
+        this.sendMessageToWebClient(
+          routed.target.requesterId,
+          routed.message,
+        );
       }
       return;
     }
@@ -771,7 +768,7 @@ export class MultiplexerDaemonHost {
 
     this.sendMessageToRuntime(id, message, {
       kind: "control",
-      controlId: controlId ?? 0,
+      requesterId: controlId ?? 0,
       clientId: id,
     });
   }
@@ -1044,7 +1041,7 @@ export class MultiplexerDaemonHost {
       try {
         this.sendMessageToRuntime(params.clientId, params.message, {
           kind: "control",
-          controlId,
+          requesterId: controlId,
           clientId: params.clientId,
           resolve: (value) => resolve(value as ResponseMessageType),
           reject,
@@ -1100,7 +1097,7 @@ export class MultiplexerDaemonHost {
 
     this.sendMessageToRuntime(params.clientId, message, {
       kind: "control",
-      controlId,
+      requesterId: controlId,
       clientId: params.clientId,
     });
   }
@@ -1299,7 +1296,7 @@ export class MultiplexerDaemonHost {
         target.resolve(parseRawResponse(message, clientId));
         return;
       }
-      this.sendToControl(target.controlId, {
+      this.sendToControl(target.requesterId, {
         kind: "event",
         event: "client-message",
         data: {
@@ -1313,7 +1310,7 @@ export class MultiplexerDaemonHost {
       return;
     }
 
-    this.sendMessageToWebClient(target.webClientId, message);
+    this.sendMessageToWebClient(target.requesterId, message);
   }
 
   private rewriteOutboundMessageData(

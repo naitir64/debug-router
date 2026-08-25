@@ -14,6 +14,7 @@
     "types": "rm -rf lib && rm -rf typings && tsc -p tsconfig.prod.json",
     "test:multiplexer": "npm run build && mocha \"../test/unit/multiplexer/**/*.test.js\" \"../test/unit/physical/**/*.test.js\"",
     "test:message": "mocha \"../test/message/**/*.test.js\"",
+    "test:integration:multiplexer": "npm run build && mocha \"../test/integration/multiplexer/**/*.test.js\"",
     "test:physical": "npm run build && mocha \"../test/unit/physical/**/*.test.js\"",
     "format": "prettier --write ."
   },

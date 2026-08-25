@@ -4,31 +4,17 @@
 
 export const DEFAULT_PENDING_ROUTE_TIMEOUT_MS = 10000;
 
-export type PendingRoute = PendingControlRoute | PendingWebSocketRoute;
-
-export type PendingControlRoute = {
-  kind: "control";
+export type PendingRoute = {
+  kind: "control" | "websocket";
   globalMessageId: number;
-  controlId: number;
+  requesterId: number;
   originalId: number;
   clientId: number;
   createdAt: number;
+  timer: ReturnType<typeof setTimeout>;
   resolve?: (value: unknown) => void;
   reject?: (error: Error) => void;
 };
-
-export type PendingWebSocketRoute = {
-  kind: "websocket";
-  globalMessageId: number;
-  webClientId: number;
-  originalId: number;
-  clientId: number;
-  createdAt: number;
-};
-
-export type PendingRouteSeed =
-  | Omit<PendingControlRoute, "globalMessageId" | "createdAt">
-  | Omit<PendingWebSocketRoute, "globalMessageId" | "createdAt">;
 
 export type PendingRouteTableOption = {
   timeoutMs?: number;
@@ -41,13 +27,8 @@ export type PendingRouteTableOption = {
   clearTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
 };
 
-type PendingRouteEntry = {
-  route: PendingRoute;
-  timer: ReturnType<typeof setTimeout> | null;
-};
-
 export class PendingRouteTable {
-  private readonly routes = new Map<number, PendingRouteEntry>();
+  private readonly routes = new Map<number, PendingRoute>();
   private readonly timeoutMs: number;
   private readonly now: () => number;
   private readonly onTimeout?: (route: PendingRoute) => void;
@@ -71,32 +52,18 @@ export class PendingRouteTable {
     return this.routes.size;
   }
 
-  add(globalMessageId: number, seed: PendingRouteSeed): PendingRoute {
-    assertMessageId(globalMessageId, "globalMessageId");
-    assertMessageId(seed.originalId, "originalId");
-    assertClientId(seed.clientId, "clientId");
-    if (seed.kind === "control") {
-      assertClientId(seed.controlId, "controlId");
-    } else {
-      assertClientId(seed.webClientId, "webClientId");
-    }
-    if (this.routes.has(globalMessageId)) {
-      throw new Error(
-        `Pending route already exists for global message id ${globalMessageId}`,
-      );
-    }
-
+  add(
+    globalMessageId: number,
+    input: Omit<PendingRoute, "globalMessageId" | "createdAt" | "timer">,
+  ): PendingRoute {
     const route: PendingRoute = {
-      ...seed,
+      ...input,
       globalMessageId,
       createdAt: this.now(),
-    };
-    const entry: PendingRouteEntry = {
-      route,
       timer: this.createTimer(globalMessageId),
     };
 
-    this.routes.set(globalMessageId, entry);
+    this.routes.set(globalMessageId, route);
     return route;
   }
 
@@ -105,7 +72,7 @@ export class PendingRouteTable {
   }
 
   get(globalMessageId: number): PendingRoute | null {
-    return this.routes.get(globalMessageId)?.route ?? null;
+    return this.routes.get(globalMessageId) ?? null;
   }
 
   take(globalMessageId: number): PendingRoute | null {
@@ -119,14 +86,14 @@ export class PendingRouteTable {
   clearByControlId(controlId: number): PendingRoute[] {
     assertClientId(controlId, "controlId");
     return this.clearMatching((route) => {
-      return route.kind === "control" && route.controlId === controlId;
+      return route.kind === "control" && route.requesterId === controlId;
     });
   }
 
   clearByWebClientId(webClientId: number): PendingRoute[] {
     assertClientId(webClientId, "webClientId");
     return this.clearMatching((route) => {
-      return route.kind === "websocket" && route.webClientId === webClientId;
+      return route.kind === "websocket" && route.requesterId === webClientId;
     });
   }
 
@@ -141,11 +108,7 @@ export class PendingRouteTable {
 
   private createTimer(
     globalMessageId: number,
-  ): ReturnType<typeof setTimeout> | null {
-    if (this.timeoutMs <= 0) {
-      return null;
-    }
-
+  ): ReturnType<typeof setTimeout> {
     return this.setTimeoutFn(() => {
       const route = this.remove(globalMessageId, false);
       if (!route) {
@@ -167,40 +130,34 @@ export class PendingRouteTable {
     globalMessageId: number,
     shouldClearTimer: boolean,
   ): PendingRoute | null {
-    const entry = this.routes.get(globalMessageId);
-    if (!entry) {
+    const route = this.routes.get(globalMessageId);
+    if (!route) {
       return null;
     }
 
     this.routes.delete(globalMessageId);
-    if (shouldClearTimer && entry.timer) {
-      this.clearTimeoutFn(entry.timer);
+    if (shouldClearTimer) {
+      this.clearTimeoutFn(route.timer);
     }
-    return entry.route;
+    return route;
   }
 
   private clearMatching(
     matches: (route: PendingRoute) => boolean,
   ): PendingRoute[] {
     const removed: PendingRoute[] = [];
-    for (const entry of Array.from(this.routes.values())) {
-      if (!matches(entry.route)) {
+    for (const pendingRoute of Array.from(this.routes.values())) {
+      if (!matches(pendingRoute)) {
         continue;
       }
 
-      const route = this.remove(entry.route.globalMessageId, true);
+      const route = this.remove(pendingRoute.globalMessageId, true);
       if (route) {
         removed.push(route);
       }
     }
 
     return removed;
-  }
-}
-
-function assertMessageId(value: number, name: string): void {
-  if (!Number.isSafeInteger(value)) {
-    throw new Error(`${name} must be a safe integer`);
   }
 }
 

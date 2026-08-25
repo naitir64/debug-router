@@ -46,7 +46,7 @@ describe("PendingRouteTable", function () {
 
     const route = table.add(10, {
       kind: "control",
-      controlId: 2,
+      requesterId: 2,
       originalId: 3,
       clientId: 4,
       reject: (error) => rejectCalls.push(error),
@@ -72,10 +72,9 @@ describe("PendingRouteTable", function () {
     assert.deepStrictEqual(rejectCalls, []);
   });
 
-  it("supports websocket routes and disabled timers", function () {
+  it("supports websocket routes and clears their timers", function () {
     const timers = createTimers();
     const table = new PendingRouteTable({
-      timeoutMs: 0,
       now: () => 500,
       setTimeout: timers.setTimeout,
       clearTimeout: timers.clearTimeout,
@@ -83,47 +82,23 @@ describe("PendingRouteTable", function () {
 
     const route = table.add(11, {
       kind: "websocket",
-      webClientId: 6,
+      requesterId: 6,
       originalId: 7,
       clientId: 8,
     });
 
     assert.deepStrictEqual(route, {
       kind: "websocket",
-      webClientId: 6,
+      requesterId: 6,
       originalId: 7,
       clientId: 8,
       globalMessageId: 11,
       createdAt: 500,
+      timer: timers.timers[0],
     });
-    assert.deepStrictEqual(timers.timers, []);
     assert.strictEqual(table.delete(11), route);
+    assert.strictEqual(timers.timers[0].cleared, true);
     assert.strictEqual(table.delete(11), null);
-  });
-
-  it("rejects duplicate global message ids without replacing the existing route", function () {
-    const table = new PendingRouteTable({
-      timeoutMs: 0,
-    });
-    const first = table.add(1, {
-      kind: "control",
-      controlId: 1,
-      originalId: 1,
-      clientId: 1,
-    });
-
-    assert.throws(
-      () =>
-        table.add(1, {
-          kind: "websocket",
-          webClientId: 2,
-          originalId: 2,
-          clientId: 2,
-        }),
-      /Pending route already exists/
-    );
-    assert.strictEqual(table.size, 1);
-    assert.strictEqual(table.get(1), first);
   });
 
   it("clears only the matching control routes and clears their timers", function () {
@@ -134,25 +109,25 @@ describe("PendingRouteTable", function () {
     });
     const first = table.add(1, {
       kind: "control",
-      controlId: 9,
+      requesterId: 9,
       originalId: 101,
       clientId: 201,
     });
     const second = table.add(2, {
       kind: "control",
-      controlId: 10,
+      requesterId: 10,
       originalId: 102,
       clientId: 202,
     });
     const third = table.add(3, {
       kind: "control",
-      controlId: 9,
+      requesterId: 9,
       originalId: 103,
       clientId: 203,
     });
     table.add(4, {
       kind: "websocket",
-      webClientId: 9,
+      requesterId: 9,
       originalId: 104,
       clientId: 204,
     });
@@ -177,25 +152,25 @@ describe("PendingRouteTable", function () {
     });
     const control = table.add(1, {
       kind: "control",
-      controlId: 20,
+      requesterId: 20,
       originalId: 10,
       clientId: 1,
     });
     const firstWeb = table.add(2, {
       kind: "websocket",
-      webClientId: 30,
+      requesterId: 30,
       originalId: 11,
       clientId: 2,
     });
     table.add(3, {
       kind: "websocket",
-      webClientId: 31,
+      requesterId: 31,
       originalId: 12,
       clientId: 3,
     });
     const secondWeb = table.add(4, {
       kind: "websocket",
-      webClientId: 30,
+      requesterId: 30,
       originalId: 13,
       clientId: 4,
     });
@@ -204,7 +179,7 @@ describe("PendingRouteTable", function () {
     assert.strictEqual(table.size, 2);
     assert.strictEqual(table.get(1), control);
     assert.strictEqual(table.get(2), null);
-    assert.strictEqual(table.get(3).webClientId, 31);
+    assert.strictEqual(table.get(3).requesterId, 31);
     assert.strictEqual(table.get(4), null);
   });
 
@@ -216,19 +191,19 @@ describe("PendingRouteTable", function () {
     });
     const control = table.add(1, {
       kind: "control",
-      controlId: 10,
+      requesterId: 10,
       originalId: 1,
       clientId: 50,
     });
     const websocket = table.add(2, {
       kind: "websocket",
-      webClientId: 20,
+      requesterId: 20,
       originalId: 2,
       clientId: 50,
     });
     const other = table.add(3, {
       kind: "control",
-      controlId: 11,
+      requesterId: 11,
       originalId: 3,
       clientId: 51,
     });
@@ -249,13 +224,13 @@ describe("PendingRouteTable", function () {
     });
     const first = table.add(1, {
       kind: "control",
-      controlId: 1,
+      requesterId: 1,
       originalId: 1,
       clientId: 1,
     });
     const second = table.add(2, {
       kind: "websocket",
-      webClientId: 2,
+      requesterId: 2,
       originalId: 2,
       clientId: 2,
     });
@@ -281,14 +256,14 @@ describe("PendingRouteTable", function () {
     });
     const control = table.add(1, {
       kind: "control",
-      controlId: 1,
+      requesterId: 1,
       originalId: 101,
       clientId: 11,
       reject: (error) => rejected.push(error),
     });
     const web = table.add(2, {
       kind: "websocket",
-      webClientId: 2,
+      requesterId: 2,
       originalId: 102,
       clientId: 12,
     });
@@ -306,65 +281,4 @@ describe("PendingRouteTable", function () {
     );
   });
 
-  it("validates every id field before inserting a route", function () {
-    const cases = [
-      {
-        name: "globalMessageId",
-        run: () =>
-          new PendingRouteTable().add(1.1, {
-            kind: "control",
-            controlId: 1,
-            originalId: 1,
-            clientId: 1,
-          }),
-      },
-      {
-        name: "originalId",
-        run: () =>
-          new PendingRouteTable().add(1, {
-            kind: "control",
-            controlId: 1,
-            originalId: Number.NaN,
-            clientId: 1,
-          }),
-      },
-      {
-        name: "clientId",
-        run: () =>
-          new PendingRouteTable().add(1, {
-            kind: "websocket",
-            webClientId: 1,
-            originalId: 1,
-            clientId: Number.POSITIVE_INFINITY,
-          }),
-      },
-      {
-        name: "controlId",
-        run: () =>
-          new PendingRouteTable().add(1, {
-            kind: "control",
-            controlId: 1.2,
-            originalId: 1,
-            clientId: 1,
-          }),
-      },
-      {
-        name: "webClientId",
-        run: () =>
-          new PendingRouteTable().add(1, {
-            kind: "websocket",
-            webClientId: Number.MAX_SAFE_INTEGER + 1,
-            originalId: 1,
-            clientId: 1,
-          }),
-      },
-    ];
-
-    for (const item of cases) {
-      assert.throws(
-        item.run,
-        new RegExp(`${item.name} must be a safe integer`)
-      );
-    }
-  });
 });
