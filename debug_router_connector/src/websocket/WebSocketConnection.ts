@@ -121,26 +121,26 @@ export class WebSocketClient extends Client {
   }
 
   private handleMessage(data: any): void {
-    let dataString = "";
-    if (this.isBufferClass(data)) {
-      dataString = data.toString();
-    } else if (typeof data === "string") {
-      dataString = data;
-      defaultLogger.debug("handleMessage received data with type 'string'");
-    }
-    const message = JSON.parse(dataString);
-    if (this.type() === "Driver") {
-      this.server.emitEvent("ws-web-message", this.clientId(), dataString);
-    } else {
-      this.server.emitEvent("ws-client-message", this.clientId(), dataString);
-    }
-    if (message.event === "ListClients") {
-      this.handleListClients();
-    } else if (message.event === "Ping") {
-      this.handlePing();
-    } else if (message.event === "Customized") {
-      this.handleCustomizedMessage(message, dataString);
-      try {
+    try {
+      let dataString = "";
+      if (this.isBufferClass(data)) {
+        dataString = data.toString();
+      } else if (typeof data === "string") {
+        dataString = data;
+        defaultLogger.debug("handleMessage received data with type 'string'");
+      }
+      const message = JSON.parse(dataString);
+      if (this.type() === "Driver") {
+        this.server.emitEvent("ws-web-message", this.clientId(), dataString);
+      } else if (message.event !== "Customized") {
+        this.server.emitEvent("ws-client-message", this.clientId(), dataString);
+      }
+      if (message.event === "ListClients") {
+        this.handleListClients();
+      } else if (message.event === "Ping") {
+        this.handlePing();
+      } else if (message.event === "Customized") {
+        this.handleCustomizedMessage(message, dataString);
         const payload = message?.data?.data?.message;
         if (typeof payload === "string") {
           const cdpMessage = JSON.parse(payload);
@@ -158,12 +158,12 @@ export class WebSocketClient extends Client {
               JSON.stringify(message),
           );
         }
-      } catch (error: any) {
-        defaultLogger.debug(
-          "webSocketClient handleCustomizedMessage parse error:" +
-            error?.message,
-        );
       }
+    } catch (error: any) {
+      defaultLogger.debug(
+        "webSocketClient handleCustomizedMessage parse error:" +
+          error?.message,
+      );
     }
   }
 
