@@ -103,8 +103,8 @@ function createServer() {
         message,
       });
     },
-    handleDisconnect(id, client) {
-      calls.disconnects.push({ id, client });
+    handleDisconnect(id) {
+      calls.disconnects.push(id);
     },
   };
 }
@@ -212,7 +212,13 @@ describe("WebSocketClient", function () {
 
     socket.emit("message", message);
 
-    assert.deepStrictEqual(server.calls.emitted, []);
+    assert.deepStrictEqual(server.calls.emitted, [
+      {
+        event: "ws-client-message",
+        id: 200,
+        message,
+      },
+    ]);
     assert.deepStrictEqual(server.calls.handleWebSocketAppMessage, [
       {
         id: 200,
@@ -222,7 +228,7 @@ describe("WebSocketClient", function () {
     assert.deepStrictEqual(server.calls.sendMessageToWeb, []);
   });
 
-  it("delegates runtime Customized messages without a sender so the host can still publish the raw event", function () {
+  it("does not delegate runtime Customized messages without a sender", function () {
     const server = createServer();
     const socket = createSocket();
     new WebSocketClient(server, createInfo(201, "runtime"), socket);
@@ -236,7 +242,7 @@ describe("WebSocketClient", function () {
       )
     );
 
-    assert.strictEqual(server.calls.handleWebSocketAppMessage.length, 1);
+    assert.strictEqual(server.calls.handleWebSocketAppMessage.length, 0);
   });
 
   it("handles ListClients and Ping for Driver clients", function () {
@@ -283,20 +289,6 @@ describe("WebSocketClient", function () {
     assert.deepStrictEqual(JSON.parse(socket.sent[1]), {
       event: "Pong",
     });
-  });
-
-  it("does not hide USB runtime clients whose id matches the Driver client id", function () {
-    const server = createServer();
-    const socket = createSocket();
-    server.usbClients.push(createUsbClient(301));
-    new WebSocketClient(server, createInfo(301, "Driver"), socket);
-
-    socket.emit("message", JSON.stringify({ event: "ListClients" }));
-
-    assert.deepStrictEqual(
-      JSON.parse(socket.sent[0]).data.map((client) => client.id),
-      [7, 301]
-    );
   });
 
   it("ignores ListClients and Ping replies for runtime clients", function () {
@@ -410,7 +402,7 @@ describe("WebSocketClient", function () {
   it("notifies the server when the socket closes", function () {
     const server = createServer();
     const socket = createSocket();
-    const client = new WebSocketClient(
+    new WebSocketClient(
       server,
       createInfo(700, "Driver"),
       socket
@@ -418,24 +410,7 @@ describe("WebSocketClient", function () {
 
     socket.emit("close");
 
-    assert.deepStrictEqual(server.calls.disconnects, [{ id: 700, client }]);
+    assert.deepStrictEqual(server.calls.disconnects, [700]);
   });
 
-  it("contains malformed messages and host routing failures without closing the socket", function () {
-    const server = createServer();
-    const socket = createSocket();
-    server.sendMessageToApp = () => {
-      throw new Error("target routing failed");
-    };
-    new WebSocketClient(server, createInfo(701, "Driver"), socket);
-
-    assert.doesNotThrow(() => socket.emit("message", "{bad-json"));
-    assert.doesNotThrow(() =>
-      socket.emit(
-        "message",
-        JSON.stringify(createCustomizedMessage({ id: 3, clientId: 404 }))
-      )
-    );
-    assert.strictEqual(socket.closeCalls, 0);
-  });
 });

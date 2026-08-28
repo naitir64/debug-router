@@ -34,6 +34,39 @@ function createTimers() {
 }
 
 describe("PendingRouteTable", function () {
+  it("allocates sequential global message ids without reusing removed ids", function () {
+    const timers = createTimers();
+    const table = new PendingRouteTable({
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    const first = table.add({
+      kind: "control",
+      requesterId: 1,
+      originalId: 10,
+      clientId: 100,
+    });
+    const second = table.add({
+      kind: "websocket",
+      requesterId: 2,
+      originalId: 20,
+      clientId: 200,
+    });
+
+    assert.strictEqual(first.globalMessageId, 1);
+    assert.strictEqual(second.globalMessageId, 2);
+    table.take(first.globalMessageId);
+
+    const third = table.add({
+      kind: "control",
+      requesterId: 3,
+      originalId: 30,
+      clientId: 300,
+    });
+    assert.strictEqual(third.globalMessageId, 3);
+    table.clear();
+  });
+
   it("adds, gets, takes, and clears a control route timer", function () {
     const timers = createTimers();
     let now = 100;
@@ -44,7 +77,7 @@ describe("PendingRouteTable", function () {
     });
     const rejectCalls = [];
 
-    const route = table.add(10, {
+    const route = table.add({
       kind: "control",
       requesterId: 2,
       originalId: 3,
@@ -53,10 +86,10 @@ describe("PendingRouteTable", function () {
     });
 
     assert.strictEqual(route.createdAt, 100);
-    assert.strictEqual(route.globalMessageId, 10);
+    assert.strictEqual(route.globalMessageId, 1);
     assert.strictEqual(table.size, 1);
-    assert.strictEqual(table.has(10), true);
-    assert.strictEqual(table.get(10), route);
+    assert.strictEqual(table.has(1), true);
+    assert.strictEqual(table.get(1), route);
     assert.strictEqual(timers.timers.length, 1);
     assert.strictEqual(
       timers.timers[0].timeoutMs,
@@ -64,9 +97,9 @@ describe("PendingRouteTable", function () {
     );
 
     now = 200;
-    assert.strictEqual(table.take(10), route);
+    assert.strictEqual(table.take(1), route);
     assert.strictEqual(table.size, 0);
-    assert.strictEqual(table.get(10), null);
+    assert.strictEqual(table.get(1), null);
     assert.strictEqual(timers.timers[0].cleared, true);
     timers.run(timers.timers[0]);
     assert.deepStrictEqual(rejectCalls, []);
@@ -80,7 +113,7 @@ describe("PendingRouteTable", function () {
       clearTimeout: timers.clearTimeout,
     });
 
-    const route = table.add(11, {
+    const route = table.add({
       kind: "websocket",
       requesterId: 6,
       originalId: 7,
@@ -92,13 +125,13 @@ describe("PendingRouteTable", function () {
       requesterId: 6,
       originalId: 7,
       clientId: 8,
-      globalMessageId: 11,
+      globalMessageId: 1,
       createdAt: 500,
       timer: timers.timers[0],
     });
-    assert.strictEqual(table.delete(11), route);
+    assert.strictEqual(table.delete(1), route);
     assert.strictEqual(timers.timers[0].cleared, true);
-    assert.strictEqual(table.delete(11), null);
+    assert.strictEqual(table.delete(1), null);
   });
 
   it("clears only the matching control routes and clears their timers", function () {
@@ -107,25 +140,25 @@ describe("PendingRouteTable", function () {
       setTimeout: timers.setTimeout,
       clearTimeout: timers.clearTimeout,
     });
-    const first = table.add(1, {
+    const first = table.add({
       kind: "control",
       requesterId: 9,
       originalId: 101,
       clientId: 201,
     });
-    const second = table.add(2, {
+    const second = table.add({
       kind: "control",
       requesterId: 10,
       originalId: 102,
       clientId: 202,
     });
-    const third = table.add(3, {
+    const third = table.add({
       kind: "control",
       requesterId: 9,
       originalId: 103,
       clientId: 203,
     });
-    table.add(4, {
+    table.add({
       kind: "websocket",
       requesterId: 9,
       originalId: 104,
@@ -150,25 +183,25 @@ describe("PendingRouteTable", function () {
       setTimeout: timers.setTimeout,
       clearTimeout: timers.clearTimeout,
     });
-    const control = table.add(1, {
+    const control = table.add({
       kind: "control",
       requesterId: 20,
       originalId: 10,
       clientId: 1,
     });
-    const firstWeb = table.add(2, {
+    const firstWeb = table.add({
       kind: "websocket",
       requesterId: 30,
       originalId: 11,
       clientId: 2,
     });
-    table.add(3, {
+    table.add({
       kind: "websocket",
       requesterId: 31,
       originalId: 12,
       clientId: 3,
     });
-    const secondWeb = table.add(4, {
+    const secondWeb = table.add({
       kind: "websocket",
       requesterId: 30,
       originalId: 13,
@@ -189,19 +222,19 @@ describe("PendingRouteTable", function () {
       setTimeout: timers.setTimeout,
       clearTimeout: timers.clearTimeout,
     });
-    const control = table.add(1, {
+    const control = table.add({
       kind: "control",
       requesterId: 10,
       originalId: 1,
       clientId: 50,
     });
-    const websocket = table.add(2, {
+    const websocket = table.add({
       kind: "websocket",
       requesterId: 20,
       originalId: 2,
       clientId: 50,
     });
-    const other = table.add(3, {
+    const other = table.add({
       kind: "control",
       requesterId: 11,
       originalId: 3,
@@ -222,13 +255,13 @@ describe("PendingRouteTable", function () {
       setTimeout: timers.setTimeout,
       clearTimeout: timers.clearTimeout,
     });
-    const first = table.add(1, {
+    const first = table.add({
       kind: "control",
       requesterId: 1,
       originalId: 1,
       clientId: 1,
     });
-    const second = table.add(2, {
+    const second = table.add({
       kind: "websocket",
       requesterId: 2,
       originalId: 2,
@@ -254,14 +287,14 @@ describe("PendingRouteTable", function () {
       clearTimeout: timers.clearTimeout,
       onTimeout: (route) => timeoutRoutes.push(route),
     });
-    const control = table.add(1, {
+    const control = table.add({
       kind: "control",
       requesterId: 1,
       originalId: 101,
       clientId: 11,
       reject: (error) => rejected.push(error),
     });
-    const web = table.add(2, {
+    const web = table.add({
       kind: "websocket",
       requesterId: 2,
       originalId: 102,
@@ -280,5 +313,4 @@ describe("PendingRouteTable", function () {
       /Timed out waiting for response to global message id 1/
     );
   });
-
 });

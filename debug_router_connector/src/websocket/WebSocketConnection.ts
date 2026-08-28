@@ -65,6 +65,7 @@ export class WebSocketClient extends Client {
     const wsClients = this.server.getAllWebsocketAppClients();
     const data = new Array();
     wsClients.forEach((client) => {
+      if (client.clientId() === this.clientId()) return;
       data.push({
         id: client.clientId(),
         type: client.info.type,
@@ -77,6 +78,7 @@ export class WebSocketClient extends Client {
 
     const usbClients = this.server.getAllUsbClients();
     usbClients.forEach((client) => {
+      if (client.clientId() === this.clientId()) return;
       data.push({
         id: client.clientId(),
         type: "runtime",
@@ -99,7 +101,7 @@ export class WebSocketClient extends Client {
   }
 
   private handleClose() {
-    this.server.handleDisconnect(this.clientId(), this);
+    this.server.handleDisconnect(this.clientId());
   }
 
   private isBufferClass(data: any) {
@@ -119,26 +121,26 @@ export class WebSocketClient extends Client {
   }
 
   private handleMessage(data: any): void {
-    try {
-      let dataString = "";
-      if (this.isBufferClass(data)) {
-        dataString = data.toString();
-      } else if (typeof data === "string") {
-        dataString = data;
-        defaultLogger.debug("handleMessage received data with type 'string'");
-      }
-      const message = JSON.parse(dataString);
-      if (this.type() === "Driver") {
-        this.server.emitEvent("ws-web-message", this.clientId(), dataString);
-      } else if (message.event !== "Customized") {
-        this.server.emitEvent("ws-client-message", this.clientId(), dataString);
-      }
-      if (message.event === "ListClients") {
-        this.handleListClients();
-      } else if (message.event === "Ping") {
-        this.handlePing();
-      } else if (message.event === "Customized") {
-        this.handleCustomizedMessage(message, dataString);
+    let dataString = "";
+    if (this.isBufferClass(data)) {
+      dataString = data.toString();
+    } else if (typeof data === "string") {
+      dataString = data;
+      defaultLogger.debug("handleMessage received data with type 'string'");
+    }
+    const message = JSON.parse(dataString);
+    if (this.type() === "Driver") {
+      this.server.emitEvent("ws-web-message", this.clientId(), dataString);
+    } else {
+      this.server.emitEvent("ws-client-message", this.clientId(), dataString);
+    }
+    if (message.event === "ListClients") {
+      this.handleListClients();
+    } else if (message.event === "Ping") {
+      this.handlePing();
+    } else if (message.event === "Customized") {
+      this.handleCustomizedMessage(message, dataString);
+      try {
         const payload = message?.data?.data?.message;
         if (typeof payload === "string") {
           const cdpMessage = JSON.parse(payload);
@@ -156,13 +158,12 @@ export class WebSocketClient extends Client {
               JSON.stringify(message),
           );
         }
+      } catch (error: any) {
+        defaultLogger.debug(
+          "webSocketClient handleCustomizedMessage parse error:" +
+            error?.message,
+        );
       }
-    } catch (error: any) {
-      defaultLogger.warn(
-        `Failed to handle websocket message for client ${this.clientId()}: ${
-          error?.message ?? String(error)
-        }`,
-      );
     }
   }
 
@@ -176,6 +177,10 @@ export class WebSocketClient extends Client {
       this.server.sendMessageToApp(id, message, this.clientId());
     } else {
       // message from app, let the server/host decide whether to route or broadcast
+      const id = data.data?.sender ?? -1;
+      if (id == -1) {
+        return;
+      }
       this.server.handleWebSocketAppMessage(this.clientId(), message);
     }
   }

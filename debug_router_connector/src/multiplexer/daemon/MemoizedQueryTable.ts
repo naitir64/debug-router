@@ -4,14 +4,14 @@
 
 import { SocketEvent } from "../../utils/type";
 
-export const DEFAULT_MEMOIZED_NOTIFICATION_TTL_MS = 1000;
+export const DEFAULT_MEMOIZED_QUERY_TTL_MS = 1000;
 
-export type MemoizedNotificationQueryDefinition = {
+export type MemoizedQueryDefinition = {
   requestType: string;
   notificationType: string;
 };
 
-export type MemoizedNotificationQueryDecision =
+export type MemoizedQueryDecision =
   | {
       action: "not-memoized";
     }
@@ -27,8 +27,8 @@ export type MemoizedNotificationQueryDecision =
       message: string;
     };
 
-export type MemoizedNotificationQueryTableOption = {
-  definitions?: readonly MemoizedNotificationQueryDefinition[];
+export type MemoizedQueryTableOption = {
+  definitions?: readonly MemoizedQueryDefinition[];
   ttlMs?: number;
   now?: () => number;
 };
@@ -38,16 +38,15 @@ type MemoizedNotification = {
   receivedAt: number;
 };
 
-const DEFAULT_QUERY_DEFINITIONS: readonly MemoizedNotificationQueryDefinition[] = [
+const DEFAULT_QUERY_DEFINITIONS: readonly MemoizedQueryDefinition[] = [
   {
     requestType: "ListSession",
     notificationType: "SessionList",
   },
 ];
 
-export class MemoizedNotificationQueryTable {
-  private readonly notificationTypeByRequestType = new Map<string, string>();
-  private readonly requestTypeByNotificationType = new Map<string, string>();
+export class MemoizedQueryTable {
+  private readonly definitions: readonly MemoizedQueryDefinition[];
   private readonly notifications = new Map<
     number,
     Map<string, MemoizedNotification>
@@ -56,28 +55,17 @@ export class MemoizedNotificationQueryTable {
   private readonly ttlMs: number;
   private readonly now: () => number;
 
-  constructor(option: MemoizedNotificationQueryTableOption = {}) {
-    this.ttlMs = resolveTtlMs(option.ttlMs);
+  constructor(option: MemoizedQueryTableOption = {}) {
+    this.ttlMs = option.ttlMs ?? DEFAULT_MEMOIZED_QUERY_TTL_MS;
     this.now = option.now ?? Date.now;
-
-    const definitions = option.definitions ?? DEFAULT_QUERY_DEFINITIONS;
-    for (const definition of definitions) {
-      this.notificationTypeByRequestType.set(
-        definition.requestType,
-        definition.notificationType,
-      );
-      this.requestTypeByNotificationType.set(
-        definition.notificationType,
-        definition.requestType,
-      );
-    }
+    this.definitions = option.definitions ?? DEFAULT_QUERY_DEFINITIONS;
   }
 
-  query(clientId: number, message: unknown): MemoizedNotificationQueryDecision {
+  query(clientId: number, message: unknown): MemoizedQueryDecision {
     const requestType = getCustomizedType(message);
-    const notificationType = requestType
-      ? this.notificationTypeByRequestType.get(requestType)
-      : undefined;
+    const notificationType = this.definitions.find(
+      (definition) => definition.requestType === requestType,
+    )?.notificationType;
     if (!requestType || !notificationType) {
       return {
         action: "not-memoized",
@@ -107,9 +95,9 @@ export class MemoizedNotificationQueryTable {
 
   recordNotification(clientId: number, message: string): boolean {
     const notificationType = getCustomizedType(parseJsonOrNull(message));
-    const requestType = notificationType
-      ? this.requestTypeByNotificationType.get(notificationType)
-      : undefined;
+    const requestType = this.definitions.find(
+      (definition) => definition.notificationType === notificationType,
+    )?.requestType;
     if (!notificationType || !requestType) {
       return false;
     }
@@ -188,13 +176,6 @@ export class MemoizedNotificationQueryTable {
       this.pendingQueries.delete(clientId);
     }
   }
-}
-
-function resolveTtlMs(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value) || value < 0) {
-    return DEFAULT_MEMOIZED_NOTIFICATION_TTL_MS;
-  }
-  return value;
 }
 
 function getCustomizedType(message: unknown): string | null {

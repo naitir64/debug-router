@@ -2,7 +2,7 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
-export const DEFAULT_PENDING_ROUTE_TIMEOUT_MS = 10000;
+export const DEFAULT_PENDING_ROUTE_TIMEOUT_MS = 5000;
 
 export type PendingRoute = {
   kind: "control" | "websocket";
@@ -29,6 +29,7 @@ export type PendingRouteTableOption = {
 
 export class PendingRouteTable {
   private readonly routes = new Map<number, PendingRoute>();
+  private nextGlobalMessageId = 1;
   private readonly timeoutMs: number;
   private readonly now: () => number;
   private readonly onTimeout?: (route: PendingRoute) => void;
@@ -53,9 +54,9 @@ export class PendingRouteTable {
   }
 
   add(
-    globalMessageId: number,
     input: Omit<PendingRoute, "globalMessageId" | "createdAt" | "timer">,
   ): PendingRoute {
+    const globalMessageId = this.createGlobalMessageId();
     const route: PendingRoute = {
       ...input,
       globalMessageId,
@@ -84,21 +85,18 @@ export class PendingRouteTable {
   }
 
   clearByControlId(controlId: number): PendingRoute[] {
-    assertClientId(controlId, "controlId");
     return this.clearMatching((route) => {
       return route.kind === "control" && route.requesterId === controlId;
     });
   }
 
   clearByWebClientId(webClientId: number): PendingRoute[] {
-    assertClientId(webClientId, "webClientId");
     return this.clearMatching((route) => {
       return route.kind === "websocket" && route.requesterId === webClientId;
     });
   }
 
   clearByClientId(clientId: number): PendingRoute[] {
-    assertClientId(clientId, "clientId");
     return this.clearMatching((route) => route.clientId === clientId);
   }
 
@@ -106,9 +104,11 @@ export class PendingRouteTable {
     return this.clearMatching(() => true);
   }
 
-  private createTimer(
-    globalMessageId: number,
-  ): ReturnType<typeof setTimeout> {
+  private createGlobalMessageId(): number {
+    return this.nextGlobalMessageId++;
+  }
+
+  private createTimer(globalMessageId: number): ReturnType<typeof setTimeout> {
     return this.setTimeoutFn(() => {
       const route = this.remove(globalMessageId, false);
       if (!route) {
@@ -158,11 +158,5 @@ export class PendingRouteTable {
     }
 
     return removed;
-  }
-}
-
-function assertClientId(value: number, name: string): void {
-  if (!Number.isSafeInteger(value)) {
-    throw new Error(`${name} must be a safe integer`);
   }
 }

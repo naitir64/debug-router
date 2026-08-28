@@ -5,9 +5,9 @@
 const assert = require("assert");
 
 const {
-  DEFAULT_MEMOIZED_NOTIFICATION_TTL_MS,
-  MemoizedNotificationQueryTable,
-} = require("../../../../debug_router_connector/dist/cjs/src/multiplexer/daemon/MemoizedNotificationQueryTable");
+  DEFAULT_MEMOIZED_QUERY_TTL_MS,
+  MemoizedQueryTable,
+} = require("../../../../debug_router_connector/dist/cjs/src/multiplexer/daemon/MemoizedQueryTable");
 
 function createCustomizedMessage(type, data = []) {
   return {
@@ -24,10 +24,10 @@ function createNotification(type, data = []) {
   return JSON.stringify(createCustomizedMessage(type, data));
 }
 
-describe("MemoizedNotificationQueryTable", function () {
+describe("MemoizedQueryTable", function () {
   it("coalesces ListSession and returns the recorded SessionList while fresh", function () {
     let now = 100;
-    const table = new MemoizedNotificationQueryTable({
+    const table = new MemoizedQueryTable({
       ttlMs: 50,
       now: () => now,
     });
@@ -54,7 +54,7 @@ describe("MemoizedNotificationQueryTable", function () {
 
   it("allows retry after pending and cached entries become stale", function () {
     let now = 200;
-    const table = new MemoizedNotificationQueryTable({
+    const table = new MemoizedQueryTable({
       ttlMs: 10,
       now: () => now,
     });
@@ -75,7 +75,7 @@ describe("MemoizedNotificationQueryTable", function () {
   });
 
   it("isolates state by runtime client and clears one client or all clients", function () {
-    const table = new MemoizedNotificationQueryTable();
+    const table = new MemoizedQueryTable();
     const query = createCustomizedMessage("ListSession");
     const firstNotification = createNotification("SessionList", ["first"]);
     const secondNotification = createNotification("SessionList", ["second"]);
@@ -95,7 +95,7 @@ describe("MemoizedNotificationQueryTable", function () {
   });
 
   it("releases a pending query after the runtime send fails", function () {
-    const table = new MemoizedNotificationQueryTable();
+    const table = new MemoizedQueryTable();
     const query = createCustomizedMessage("ListSession");
     const decision = table.query(1, query);
 
@@ -105,7 +105,7 @@ describe("MemoizedNotificationQueryTable", function () {
   });
 
   it("ignores unrelated, malformed, and unparseable messages", function () {
-    const table = new MemoizedNotificationQueryTable();
+    const table = new MemoizedQueryTable();
 
     assert.deepStrictEqual(
       table.query(1, createCustomizedMessage("OpenCard")),
@@ -125,7 +125,7 @@ describe("MemoizedNotificationQueryTable", function () {
   });
 
   it("supports additional declarative request and notification pairs", function () {
-    const table = new MemoizedNotificationQueryTable({
+    const table = new MemoizedQueryTable({
       definitions: [
         {
           requestType: "GetState",
@@ -148,21 +148,18 @@ describe("MemoizedNotificationQueryTable", function () {
     );
   });
 
-  it("uses the default TTL for missing or invalid values", function () {
-    for (const ttlMs of [undefined, -1, Number.NaN]) {
-      let now = 1000;
-      const table = new MemoizedNotificationQueryTable({
-        ttlMs,
-        now: () => now,
-      });
-      const query = createCustomizedMessage("ListSession");
-      const notification = createNotification("SessionList");
-      table.recordNotification(1, notification);
+  it("uses the default TTL when it is omitted", function () {
+    let now = 1000;
+    const table = new MemoizedQueryTable({
+      now: () => now,
+    });
+    const query = createCustomizedMessage("ListSession");
+    const notification = createNotification("SessionList");
+    table.recordNotification(1, notification);
 
-      now += DEFAULT_MEMOIZED_NOTIFICATION_TTL_MS;
-      assert.strictEqual(table.query(1, query).action, "cached");
-      now++;
-      assert.strictEqual(table.query(1, query).action, "forward");
-    }
+    now += DEFAULT_MEMOIZED_QUERY_TTL_MS;
+    assert.strictEqual(table.query(1, query).action, "cached");
+    now++;
+    assert.strictEqual(table.query(1, query).action, "forward");
   });
 });

@@ -55,9 +55,8 @@ function createController(hostOverrides = {}) {
   const calls = {
     emitted: [],
     handleWsMessage: [],
-    handleWebSocketMessage: [],
+    handleWebSocketDriverMessage: [],
     handleWebSocketAppMessage: [],
-    disconnected: [],
     createClientId: 0,
   };
   const host = {
@@ -103,8 +102,8 @@ function createController(hostOverrides = {}) {
         message,
       });
     },
-    handleWebSocketMessage(webClientId, targetClientId, message) {
-      calls.handleWebSocketMessage.push({
+    handleWebSocketDriverMessage(webClientId, targetClientId, message) {
+      calls.handleWebSocketDriverMessage.push({
         webClientId,
         targetClientId,
         message,
@@ -114,12 +113,6 @@ function createController(hostOverrides = {}) {
       calls.handleWebSocketAppMessage.push({
         appClientId,
         message,
-      });
-    },
-    handleWebSocketClientDisconnected(clientId, type) {
-      calls.disconnected.push({
-        clientId,
-        type,
       });
     },
     ...hostOverrides,
@@ -147,7 +140,7 @@ describe("WebSocketController", function () {
     controller.sendMessageToApp(11, "to-usb");
 
     assert.deepStrictEqual(app.sent, ["from-control"]);
-    assert.deepStrictEqual(calls.handleWebSocketMessage, [
+    assert.deepStrictEqual(calls.handleWebSocketDriverMessage, [
       {
         webClientId: 99,
         targetClientId: 10,
@@ -232,83 +225,7 @@ describe("WebSocketController", function () {
         "websocket-web-client-disconnected",
       ]
     );
-    assert.deepStrictEqual(calls.disconnected, [
-      {
-        clientId: 10,
-        type: "runtime",
-      },
-      {
-        clientId: 20,
-        type: "Driver",
-      },
-    ]);
     assert.strictEqual(remainingWeb.listCalls, 3);
-  });
-
-  it("uses the source client identity when app and Driver ids overlap", function () {
-    const { controller, calls } = createController();
-    const app = createClient(10, "runtime");
-    const driver = createClient(10, "Driver");
-    controller.websocketAppClients.set(10, app);
-    controller.webClients.set(10, driver);
-
-    controller.handleDisconnect(10, app);
-
-    assert.strictEqual(controller.websocketAppClients.has(10), false);
-    assert.strictEqual(controller.webClients.get(10), driver);
-    assert.deepStrictEqual(
-      calls.emitted.map((item) => item.event),
-      ["websocket-app-client-disconnected", "app-client-disconnected"]
-    );
-    assert.deepStrictEqual(calls.disconnected, [
-      {
-        clientId: 10,
-        type: "runtime",
-      },
-    ]);
-    assert.strictEqual(driver.listCalls, 1);
-  });
-
-  it("closes and removes every WiFi runtime while preserving Driver clients", function () {
-    const { controller, calls } = createController();
-    const firstApp = createClient(10, "runtime");
-    const secondApp = createClient(11, "runtime");
-    const overlappingDriver = createClient(10, "Driver");
-    const secondDriver = createClient(20, "Driver");
-    controller.websocketAppClients.set(10, firstApp);
-    controller.websocketAppClients.set(11, secondApp);
-    controller.webClients.set(10, overlappingDriver);
-    controller.webClients.set(20, secondDriver);
-
-    controller.closeAllWebsocketAppClients();
-
-    assert.deepStrictEqual(
-      Array.from(controller.websocketAppClients.keys()),
-      []
-    );
-    assert.deepStrictEqual(Array.from(controller.webClients.keys()), [10, 20]);
-    assert.strictEqual(firstApp.closeCalls, 1);
-    assert.strictEqual(secondApp.closeCalls, 1);
-    assert.strictEqual(overlappingDriver.closeCalls, 0);
-    assert.strictEqual(secondDriver.closeCalls, 0);
-    assert.deepStrictEqual(
-      calls.emitted.map((item) => item.event),
-      [
-        "websocket-app-client-disconnected",
-        "app-client-disconnected",
-        "websocket-app-client-disconnected",
-        "app-client-disconnected",
-      ]
-    );
-    assert.deepStrictEqual(
-      calls.disconnected.map(({ clientId, type }) => [clientId, type]),
-      [
-        [10, "runtime"],
-        [11, "runtime"],
-      ]
-    );
-    assert.strictEqual(overlappingDriver.listCalls, 1);
-    assert.strictEqual(secondDriver.listCalls, 1);
   });
 
   it("closes all tracked websocket clients without clearing the maps", function () {

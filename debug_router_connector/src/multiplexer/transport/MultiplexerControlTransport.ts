@@ -158,6 +158,7 @@ export class MultiplexerControlTransport {
         this.buffer = this.buffer.subarray(discardedLength);
         return;
       }
+
       this.buffer = this.buffer.subarray(frameStart);
 
       if (this.buffer.length < FRAME_HEADER_SIZE) {

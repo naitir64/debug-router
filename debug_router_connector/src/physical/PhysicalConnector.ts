@@ -456,39 +456,30 @@ export class PhysicalConnector {
     return new Promise((resolve) => {
       if (!this.devices.has(deviceId)) {
         resolve([]);
-        return;
       }
-      const currentClients = this.findUsbClientsByDeviceId(deviceId);
-      if (timeout < 0 || currentClients.length > 0) {
-        resolve(currentClients);
-        return;
+      if (timeout < 0) {
+        let clients = Array.from(this.usbClients.values());
+        clients = clients.filter((client) => {
+          return client.deviceId() === deviceId;
+        });
+        resolve(Array.from(clients.values()));
+      } else {
+        const handle = (client: UsbClient) => {
+          if (client.deviceId() === deviceId) {
+            resolve([client]);
+          }
+        };
+        this.on("client-connected", handle);
+        setTimeout(() => {
+          let clients = Array.from(this.usbClients.values());
+          clients = clients.filter((client) => {
+            return client.deviceId() === deviceId;
+          });
+          this.off("client-connected", handle);
+          resolve(Array.from(clients.values()));
+        }, timeout);
       }
-
-      const handle = (client: UsbClient) => {
-        if (client.deviceId() === deviceId) {
-          cleanup();
-          resolve([client]);
-        }
-      };
-      const cleanup = () => {
-        clearTimeout(timer);
-        this.off("client-connected", handle);
-      };
-
-      const timer = setTimeout(() => {
-        cleanup();
-        resolve(this.findUsbClientsByDeviceId(deviceId));
-      }, timeout);
-
-      this.on("client-connected", handle);
     });
-  }
-
-  // this is a helper function, only used in waitDeviceUsbClients
-  private findUsbClientsByDeviceId(deviceId: string): UsbClient[] {
-    return this.getAllUsbClients().filter(
-      (client) => client.deviceId() === deviceId,
-    );
   }
 
   // ======================================

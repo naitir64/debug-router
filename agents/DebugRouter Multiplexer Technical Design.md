@@ -100,7 +100,7 @@ Daemon side:
 
 - `debug_router_connector/src/multiplexer/daemon/entry.ts`
 - `debug_router_connector/src/multiplexer/daemon/MultiplexerDaemonHost.ts`
-- `debug_router_connector/src/multiplexer/daemon/MemoizedNotificationQueryTable.ts`
+- `debug_router_connector/src/multiplexer/daemon/MemoizedQueryTable.ts`
 - `debug_router_connector/src/multiplexer/daemon/MultiplexerControlServer.ts`
 - `debug_router_connector/src/multiplexer/daemon/MultiplexerControlConnection.ts`
 - `debug_router_connector/src/multiplexer/daemon/PendingRouteTable.ts`
@@ -503,7 +503,7 @@ WebSocket client handshake:
 
 Message paths:
 
-- Driver frontend sends `Customized` to a target runtime: `WebSocketClient` extracts the target `client_id`, calls `WebSocketController.sendMessageToApp(id, message, fromWebClientId)`, and enters `MultiplexerDaemonHost.handleWebSocketMessage()`. Host selects either a WebSocket app client (WiFi) or `PhysicalConnector.usbClients` (USB) by client id.
+- Driver frontend sends `Customized` to a target runtime: `WebSocketClient` extracts the target `client_id`, calls `WebSocketController.sendMessageToApp(id, message, fromWebClientId)`, and enters `MultiplexerDaemonHost.handleWebSocketDriverMessage()`. Host selects either a WebSocket app client (WiFi) or `PhysicalConnector.usbClients` (USB) by client id.
 - WebSocket app client sends a message to frontend: `WebSocketClient` calls `handleWebSocketAppMessage()`. Host passes it to the transport-independent `handleRuntimeMessage(appClientId, message, "websocket-runtime")`, so WiFi and USB share routing while retaining an explicit message source.
 - `ClientList` is triggered by Driver frontends and returns current WebSocket app clients and USB runtime clients. USB runtime clients use `network: "USB"`; WebSocket app clients use `network: "WiFi"`.
 
@@ -555,7 +555,7 @@ type PendingWebSocketRoute = {
 };
 ```
 
-The route timeout defaults to 10000 ms. Control route timeout rejects the corresponding Promise; WebSocket route timeout only removes the mapping.
+The route timeout defaults to 5000 ms. Control route timeout rejects the corresponding Promise; WebSocket route timeout only removes the mapping.
 
 Outbound handling:
 
@@ -564,7 +564,7 @@ Outbound handling:
 3. If `data.data.client_id` is non-zero/truthy, rewrite it according to the selected transport: USB receives `-1`, while a WiFi runtime receives its actual daemon-assigned `clientId`.
 4. Recognize the Customized payload from `data.data.message`, supporting both string and object message forms.
 5. Create a pending route only when the payload contains a safe integer `id`.
-6. Host allocates `globalMessageId`, rewrites the original ID to the global ID, and writes the mapping into `PendingRouteTable`.
+6. `PendingRouteTable` allocates `globalMessageId` while adding the route; Host rewrites the original ID to the allocated global ID.
 7. Select the real runtime by target client id and call `WebSocketClient.sendMessage()` for WiFi or `UsbClient.sendMessage()` for USB.
 
 Inbound handling:
@@ -615,11 +615,11 @@ Therefore, the current declarative mapping contains only:
 ListSession -> SessionList
 ```
 
-If another message gains the same semantics, only a request/notification mapping needs to be added to the `MemoizedNotificationQueryTable` definition; the Host state machine does not need another message-specific branch.
+If another message gains the same semantics, only a request/notification mapping needs to be added to the `MemoizedQueryTable` definition; the Host state machine does not need another message-specific branch.
 
 #### 11.2.2 Module Responsibility and State
 
-`MemoizedNotificationQueryTable` independently handles:
+`MemoizedQueryTable` independently handles:
 
 1. Determining whether a request is memoizable from the outer `Customized` `data.type`.
 2. Storing the latest notification and receive time by runtime client id and notification type.
@@ -656,7 +656,7 @@ Pending state must also recover on timeout. If the SDK never emits the expected 
 Before a frontend message is sent to a runtime:
 
 1. Host parses JSON and normalizes `client_id`.
-2. Host calls `MemoizedNotificationQueryTable.query(clientId, data)` to decide whether this request should be memoized.
+2. Host calls `MemoizedQueryTable.query(clientId, data)` to decide whether this request should be memoized.
 3. `not-memoized`: this request is outside the memoization scope, so normal message-id rewriting and runtime delivery continue. Valid outer JSON that is unrelated, has no recognized `Customized` type, or uses an unconfigured type enters this branch; invalid outer JSON is rejected before reaching the table.
 4. `forward`: the request is memoizable, but there is no fresh cache or valid pending state; record pending and forward only this request to the SDK runtime.
 5. `pending`: there is no cache, but an earlier request of the same type was already sent to the SDK through `forward`; do not send a duplicate, and wait for the SDK notification to reach all current requesters through the original broadcast path.
@@ -678,7 +678,7 @@ sequenceDiagram
     participant A as Frontend A
     participant B as Frontend B
     participant H as MultiplexerDaemonHost
-    participant T as MemoizedNotificationQueryTable
+    participant T as MemoizedQueryTable
     participant S as SDK runtime
 
     A->>H: ListSession
@@ -761,14 +761,14 @@ Recovery flow:
 
 State recovery converges on daemon snapshot. Even if an earlier control message or snapshot was lost, the full snapshot after reconnect overwrites local mirrors and realigns state.
 
-| State                                                   | Owner                                        | Recovery                                                                                                                                                                                                                          |
-| ------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Real device connection                                  | Daemon-side `PhysicalConnector`              | Daemon scans again and broadcasts snapshot.                                                                                                                                                                                       |
-| Local device, USB runtime, and WebSocket client mirrors | Connector facade                             | Rebuilt from snapshot; the WebSocket portion is restored only for a facade that requests `startWSServer()` again.                                                                                                                 |
-| Connector pending RPC                                   | Connector-side `MultiplexerDaemonClient`     | Rejected when control socket disconnects; caller retries through existing logic.                                                                                                                                                  |
-| pending route                                           | Daemon-side `PendingRouteTable`              | Created for request lifecycle; cleared on control/WebSocket disconnect, Host reset, or timeout.                                                                                                                                   |
-| memoized notification query                             | Daemon-side `MemoizedNotificationQueryTable` | Starts empty after daemon recovery and is repopulated opportunistically by matching runtime notifications; isolated by runtime client; cleared on runtime disconnect or Host/physical reset; stale entries are ignored after TTL. |
-| WiFi runtime / WebSocket frontend connection            | Daemon-side `WebSocketController`            | The app/frontend reconnects after WebSocket disconnect; Driver count is used for daemon idle detection, while requester-targeted snapshots and facade-side filtering restore the WebSocket mirrors.                               |
+| State                                                   | Owner                                    | Recovery                                                                                                                                                                                                                          |
+| ------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Real device connection                                  | Daemon-side `PhysicalConnector`          | Daemon scans again and broadcasts snapshot.                                                                                                                                                                                       |
+| Local device, USB runtime, and WebSocket client mirrors | Connector facade                         | Rebuilt from snapshot; the WebSocket portion is restored only for a facade that requests `startWSServer()` again.                                                                                                                 |
+| Connector pending RPC                                   | Connector-side `MultiplexerDaemonClient` | Rejected when control socket disconnects; caller retries through existing logic.                                                                                                                                                  |
+| pending route                                           | Daemon-side `PendingRouteTable`          | Created for request lifecycle; cleared on control/WebSocket disconnect, Host reset, or timeout.                                                                                                                                   |
+| memoized notification query                             | Daemon-side `MemoizedQueryTable`         | Starts empty after daemon recovery and is repopulated opportunistically by matching runtime notifications; isolated by runtime client; cleared on runtime disconnect or Host/physical reset; stale entries are ignored after TTL. |
+| WiFi runtime / WebSocket frontend connection            | Daemon-side `WebSocketController`        | The app/frontend reconnects after WebSocket disconnect; Driver count is used for daemon idle detection, while requester-targeted snapshots and facade-side filtering restore the WebSocket mirrors.                               |
 
 ### 13.2 Daemon Idle Auto-shutdown
 

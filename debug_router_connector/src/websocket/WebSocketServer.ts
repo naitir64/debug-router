@@ -8,25 +8,22 @@ import { UsbClient } from "../usb/Client";
 import { BaseDevice } from "../device/BaseDevice";
 import { getDriverReportService } from "../report/interface/DriverReportService";
 import { DebugerRouterDriverEvents } from "../utils/type";
-import { defaultLogger } from "../utils/logger";
 
 export type WebSocketControllerHost = {
   createClientId(): number;
   getAllUsbClients(): UsbClient[];
   getDevices(): Promise<BaseDevice[]>;
-  emit?<Event extends keyof DebugerRouterDriverEvents>(
+  emit<Event extends keyof DebugerRouterDriverEvents>(
     event: Event,
     payload: DebugerRouterDriverEvents[Event],
   ): void;
   handleWsMessage?(id: number, message: string): void;
-  handleWebSocketMessage?(
+  handleWebSocketDriverMessage?(
     webClientId: number,
     targetClientId: number,
     message: string,
   ): void;
   handleWebSocketAppMessage?(appClientId: number, message: string): void;
-  handleWebSocketClientConnected?(clientId: number, type: string): void;
-  handleWebSocketClientDisconnected?(clientId: number, type: string): void;
 };
 
 export class WebSocketController {
@@ -40,7 +37,6 @@ export class WebSocketController {
   private websocketAppClients: Map<number, WebSocketClient> = new Map();
   // web clients
   private webClients: Map<number, WebSocketClient> = new Map();
-  private closed = false;
 
   constructor(
     host: WebSocketControllerHost,
@@ -80,68 +76,27 @@ export class WebSocketController {
   }
 
   close() {
-    if (this.closed) {
-      return;
-    }
-    this.closed = true;
     this.websocketAppClients.forEach((client) => {
       client.close();
     });
     this.webClients.forEach((client) => {
       client.close();
     });
-    this.server?.close();
   }
 
-  handleDisconnect(id: number, sourceClient?: WebSocketClient) {
+  handleDisconnect(id: number) {
     const client = this.websocketAppClients.get(id);
-    if (client && (!sourceClient || sourceClient === client)) {
+    if (client) {
       this.websocketAppClients.delete(id);
-      this.controllerHost.emit?.("websocket-app-client-disconnected", id);
-      this.controllerHost.emit?.("app-client-disconnected", id);
-      this.controllerHost.handleWebSocketClientDisconnected?.(
-        id,
-        client.type(),
-      );
+      this.controllerHost.emit("websocket-app-client-disconnected", id);
+      this.controllerHost.emit("app-client-disconnected", id);
     }
     const webClient = this.webClients.get(id);
-    if (webClient && (!sourceClient || sourceClient === webClient)) {
+    if (webClient) {
       this.webClients.delete(id);
-      this.controllerHost.emit?.("websocket-web-client-disconnected", id);
-      this.controllerHost.handleWebSocketClientDisconnected?.(
-        id,
-        webClient.type(),
-      );
+      this.controllerHost.emit("websocket-web-client-disconnected", id);
     }
 
-    this.sendClientList();
-  }
-
-  closeAllWebsocketAppClients() {
-    const appClients = Array.from(this.websocketAppClients.values());
-    this.websocketAppClients.clear();
-
-    appClients.forEach((client) => {
-      const id = client.clientId();
-      this.controllerHost.emit?.("websocket-app-client-disconnected", id);
-      this.controllerHost.emit?.("app-client-disconnected", id);
-      this.controllerHost.handleWebSocketClientDisconnected?.(
-        id,
-        client.type(),
-      );
-    });
-
-    appClients.forEach((client) => {
-      try {
-        client.close();
-      } catch (error: any) {
-        defaultLogger.warn(
-          `Failed to close WebSocket app client ${client.clientId()}: ${
-            error?.message ?? String(error)
-          }`,
-        );
-      }
-    });
     this.sendClientList();
   }
 
@@ -164,13 +119,12 @@ export class WebSocketController {
 
     if (info.type === "Driver") {
       this.webClients.set(info.id, client);
-      this.controllerHost.emit?.("websocket-web-client-connected", client);
+      this.controllerHost.emit("websocket-web-client-connected", client);
     } else {
       this.websocketAppClients.set(info.id, client);
-      this.controllerHost.emit?.("websocket-app-client-connected", client);
-      this.controllerHost.emit?.("app-client-connected", client);
+      this.controllerHost.emit("websocket-app-client-connected", client);
+      this.controllerHost.emit("app-client-connected", client);
     }
-    this.controllerHost.handleWebSocketClientConnected?.(info.id, info.type);
     this.sendClientList();
   }
 
@@ -224,9 +178,13 @@ export class WebSocketController {
   sendMessageToApp(id: number, message: string, fromWebClientId?: number) {
     if (
       fromWebClientId !== undefined &&
-      this.controllerHost.handleWebSocketMessage
+      this.controllerHost.handleWebSocketDriverMessage
     ) {
-      this.controllerHost.handleWebSocketMessage(fromWebClientId, id, message);
+      this.controllerHost.handleWebSocketDriverMessage(
+        fromWebClientId,
+        id,
+        message,
+      );
       return;
     }
 
@@ -283,6 +241,6 @@ export class WebSocketController {
     id: number,
     message: string,
   ) {
-    this.controllerHost.emit?.(event, { id, message });
+    this.controllerHost.emit(event, { id, message });
   }
 }
