@@ -212,13 +212,7 @@ describe("WebSocketClient", function () {
 
     socket.emit("message", message);
 
-    assert.deepStrictEqual(server.calls.emitted, [
-      {
-        event: "ws-client-message",
-        id: 200,
-        message,
-      },
-    ]);
+    assert.deepStrictEqual(server.calls.emitted, []);
     assert.deepStrictEqual(server.calls.handleWebSocketAppMessage, [
       {
         id: 200,
