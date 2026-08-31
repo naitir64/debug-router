@@ -65,7 +65,6 @@ void Processor::process(const Json::Value &root) {
     if (custom->Is4CDP()) {
       auto cdp = custom->AsCDP();
       if (cdp->client_id_ == client_id_) {
-        LOGI("CDP Message %s" << cdp->message_.c_str());
         processMessage("CDP", cdp->session_id_, cdp->message_);
       }
     } else if (custom->Is4D2RStopAtEntry()) {

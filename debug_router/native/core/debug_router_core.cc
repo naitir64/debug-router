@@ -19,7 +19,6 @@
 #include "debug_router/native/processor/message_handler.h"
 #include "debug_router/native/processor/processor.h"
 #include "debug_router/native/thread/debug_router_executor.h"
-#include "debug_router_state_listener.h"
 #include "json/value.h"
 
 namespace debugrouter {
@@ -58,10 +57,9 @@ class MessageHandlerCore : public processor::MessageHandler {
     DebugRouterMessageHandler *handler =
         DebugRouterCore::GetInstance().message_handlers_[method];
     if (handler) {
-      LOGI("DebugRouterCore: handle exists: " << method);
       return handler->Handle(params);
     } else {
-      LOGI("DebugRouterCore: handle does not exists: " << method);
+      LOGW("DebugRouterCore: handler not found, method=" << method);
       return "{\"code\":-2,\"message\":\"not implemented\"}";
     }
   }
@@ -83,6 +81,16 @@ class MessageHandlerCore : public processor::MessageHandler {
       for (auto *handler : handlers) {
         handler->OnMessage(message, type);
       }
+      return;
+    }
+
+    // Defensive second-layer filtering: transport-level filtering should
+    // already drop inactive session-bound messages, but keep this guard here
+    // so raw/custom paths cannot accidentally fan out inactive session_id > 0
+    // payloads to handlers if they bypass the transport helper.
+    if (!DebugRouterCore::GetInstance().isEnableAllSessions() &&
+        session_id > 0 &&
+        !DebugRouterCore::GetInstance().isActiveSession(session_id)) {
       return;
     }
 
@@ -215,7 +223,9 @@ void DebugRouterCore::DisconnectAsync() {
 
 void DebugRouterCore::Reconnect() {
   if (!server_url_.empty() && !room_id_.empty()) {
-    LOGI("DebugRouterCore::Reconnect.");
+    LOGW("Reconnect, retry_times="
+         << retry_times_.load(std::memory_order_relaxed)
+         << ", url=" << server_url_ << ", room=" << room_id_);
     Connect(server_url_, room_id_, true);
   }
 }
@@ -227,9 +237,9 @@ void DebugRouterCore::Connect(const std::string &url, const std::string &room,
   if (pos != std::string::npos) {
     curr_host_ = url.substr(0, pos + 12);
   }
-  LOGI("curr_host_: " << curr_host_ << " host_url_: " << host_url_);
-  LOGI("current status:" << GetConnectionState());
-  LOGI("room: " << room << " LastRoomId: " << GetRoomId());
+  LOGI("Connect, reconnect=" << is_reconnect << ", url=" << url
+                             << ", room=" << room << ", last_host=" << host_url_
+                             << ", last_room=" << GetRoomId());
 
   Json::Value catagaryJson;
   catagaryJson["url"] = url;
@@ -238,7 +248,7 @@ void DebugRouterCore::Connect(const std::string &url, const std::string &room,
       GetConnectionState() != DISCONNECTED) {
     catagaryJson["attribution"] = "User Incorrect Call";
     std::string catagary = catagaryJson.toStyledString();
-    LOGI("DebugRouterCore::Connect already connect this host and room.");
+    LOGW("Connect skipped, same host and room are already active");
     Report("RedundantConnect", catagary, "", "");
     return;
   }
@@ -285,6 +295,10 @@ void DebugRouterCore::SendAsync(const std::string &message) {
 void DebugRouterCore::SendData(const std::string &data, const std::string &type,
                                int32_t session, int32_t mark, bool is_object) {
   if (connection_state_.load(std::memory_order_relaxed) == CONNECTED) {
+    if (!enable_all_sessions_.load(std::memory_order_relaxed) && session > 0 &&
+        !isActiveSession(session)) {
+      return;
+    }
     std::string message =
         processor_->WrapCustomizedMessage(type, session, data, mark, is_object);
     Send(message);
@@ -334,17 +348,12 @@ int32_t DebugRouterCore::GetUSBPort() {
 
 void DebugRouterCore::Pull(int32_t session_id_) {
   LOGI("pull session: " << session_id_);
-  bool removed_enabled_session = false;
   if (!enable_all_sessions_.load(std::memory_order_relaxed)) {
     std::unique_lock lock(enabled_sessions_mutex_);
-    removed_enabled_session = enabled_session_ids_.erase(session_id_) > 0;
+    enabled_session_ids_.erase(session_id_);
   }
-  // Server availability only depends on debug channel / enable-all /
-  // enabled-session ids. Pull() only needs to refresh the server state when it
-  // actually removes an enabled session from that decision set.
-  if (removed_enabled_session) {
-    UpdateServerState();
-  }
+  // Server availability no longer depends on enabled-session ids. Pull() only
+  // updates the filter set used by isActiveSession().
   {
     std::unique_lock lock(slots_mutex_);
     slots_.erase(session_id_);
@@ -435,7 +444,6 @@ void DebugRouterCore::OnOpen(
   }
 
   for (const auto &listener : listeners) {
-    LOGI("do state_listeners_ onopen.");
     listener->OnOpen(connect_type);
   }
 }
@@ -460,7 +468,6 @@ void DebugRouterCore::OnClosed(
     }
 
     for (const auto &listener : listeners) {
-      LOGI("do state_listeners_ onclose.");
       listener->OnClose(-1, "unknown reason");
     }
   }
@@ -471,10 +478,9 @@ void DebugRouterCore::OnClosed(
       std::string result = DebugRouterConfigs::GetInstance().GetConfig(
           kForbidReconnectWhenClose, "false");
       if (result == "true") {
-        LOGI("onClosed: forbid reconnect");
+        LOGW("Reconnect skipped after close by config");
         return;
       }
-      LOGI("onClosed: try to reconnect");
       TryToReconnect();
     }
   }
@@ -483,7 +489,7 @@ void DebugRouterCore::OnClosed(
 void DebugRouterCore::OnFailure(
     const std::shared_ptr<MessageTransceiver> &transceiver,
     const std::string &error_message, int error_code) {
-  LOGI("DebugRouterCore: onFailure.");
+  LOGI("DebugRouterCore: onFailure. errorcode: " << error_code);
   if ((current_transceiver_ != nullptr &&
        transceiver != current_transceiver_) ||
       connection_state_.load(std::memory_order_relaxed) == DISCONNECTED) {
@@ -533,7 +539,6 @@ void DebugRouterCore::OnFailure(
 
     for (const auto &listener : listeners) {
       // TODO(zhoumingsong.smile): add more details
-      LOGI("do state_listeners_ onfailure.");
       listener->OnError(error_message);
     }
   }
@@ -541,7 +546,6 @@ void DebugRouterCore::OnFailure(
   if (transceiver->GetType() == ConnectionType::kWebSocket) {
     if (current_transceiver_ == nullptr ||
         current_transceiver_->GetType() == ConnectionType::kWebSocket) {
-      LOGI("onFailure: try to reconnect");
       TryToReconnect();
     }
   }
@@ -553,7 +557,6 @@ void DebugRouterCore::OnMessage(
   if (transceiver != current_transceiver_) {
     return;
   }
-  LOGI("DebugRouter OnMessage.");
   processor_->Process(message);
 
   std::vector<std::shared_ptr<DebugRouterStateListener>> listeners;
@@ -599,10 +602,8 @@ void DebugRouterCore::AddMessageHandler(DebugRouterMessageHandler *handler) {
     return;
   }
   std::string handler_name = handler->GetName();
-  if (message_handlers_.find(handler_name) == message_handlers_.end()) {
-    LOGI("DebugRouterCore: add a new message handler successfully.");
-  } else {
-    LOGI("DebugRouterCore: " << handler_name << " handler has been override.");
+  if (message_handlers_.find(handler_name) != message_handlers_.end()) {
+    LOGW("DebugRouterCore: " << handler_name << " handler has been override.");
   }
   message_handlers_[handler_name] = handler;
 }
@@ -644,7 +645,6 @@ std::string DebugRouterCore::GetServerUrl() { return server_url_; }
 bool DebugRouterCore::HandleSchema(const std::string &encode_schema) {
   std::string url, room;
   std::string schema = util::decodeURIComponent(encode_schema);
-  LOGI("handle schema: " << schema);
   Json::Value catagaryJson;
   catagaryJson["schema"] = schema;
   std::string catagary = catagaryJson.toStyledString();
@@ -707,11 +707,9 @@ bool DebugRouterCore::HandleSchema(const std::string &encode_schema) {
       LOGE("invalid schema" << schema);
       return false;
     }
-    LOGI("handle schema: enable status makes us connectAsync.");
     ConnectAsync(url, room);
     return true;
   } else if (!cmd.compare("disable")) {
-    LOGI("handle schema: disable status makes us DisconnectAsync.");
     DisconnectAsync();
     return true;
   } else {
@@ -724,7 +722,6 @@ bool DebugRouterCore::HandleSchema(const std::string &encode_schema) {
 
 void DebugRouterCore::AddStateListener(
     const std::shared_ptr<DebugRouterStateListener> &listener) {
-  LOGI("DebugRouterCore: add a state listener.");
   if (listener == nullptr) {
     return;
   }
@@ -770,7 +767,6 @@ std::string DebugRouterCore::GetAppInfoByKey(const std::string &key) {
 
 void DebugRouterCore::NotifyConnectStateByMessage(ConnectionState state) {
   std::string state_msg = GetConnectionStateMsg(state);
-  LOGI("notify connect state: " << state_msg);
   if (state_msg.empty()) {
     return;
   }
@@ -800,12 +796,8 @@ std::string DebugRouterCore::GetConnectionStateMsg(ConnectionState state) {
 }
 
 bool DebugRouterCore::ShouldServerRun() {
-  if (enable_all_sessions_.load(std::memory_order_relaxed) ||
-      debug_channel_enabled_.load(std::memory_order_relaxed)) {
-    return true;
-  }
-  std::shared_lock lock(enabled_sessions_mutex_);
-  return !enabled_session_ids_.empty();
+  return enable_all_sessions_.load(std::memory_order_relaxed) ||
+         debug_channel_enabled_.load(std::memory_order_relaxed);
 }
 
 void DebugRouterCore::UpdateServerState() {
@@ -822,6 +814,17 @@ void DebugRouterCore::UpdateServerState() {
           const bool was_running =
               server_running_.exchange(should_run, std::memory_order_relaxed);
           if (was_running != should_run) {
+            if (!should_run && current_transceiver_ != nullptr &&
+                current_transceiver_->GetType() == ConnectionType::kUsb) {
+              // DisableDebugChannel only gates the local USB debug server.
+              // Force the current USB transport through the core OnClosed()
+              // path so protocol listeners and native state_listeners_ stay in
+              // sync. Active websocket connections are not owned by
+              // StopServer() and are intentionally left untouched here.
+              auto current_transceiver = current_transceiver_;
+              OnClosed(current_transceiver);
+              current_transceiver->Disconnect();
+            }
             for (size_t i = 0; i < kTransceiverCount; ++i) {
               if (should_run) {
                 message_transceivers_[i]->StartServer();
@@ -865,13 +868,9 @@ void DebugRouterCore::EnableSingleSession(int32_t session_id) {
     return;
   }
   LOGI("enableSingleSession: " << session_id);
-  bool inserted = false;
   {
     std::unique_lock lock(enabled_sessions_mutex_);
-    inserted = enabled_session_ids_.insert(session_id).second;
-  }
-  if (inserted) {
-    UpdateServerState();
+    enabled_session_ids_.insert(session_id);
   }
 }
 
@@ -904,6 +903,11 @@ void DebugRouterCore::DisableDebugChannel() {
     return;
   }
   LOGI("DisableDebugChannel");
+  if (!enable_all_sessions_.load(std::memory_order_relaxed) &&
+      current_transceiver_ != nullptr &&
+      current_transceiver_->GetType() == ConnectionType::kUsb) {
+    connection_state_.store(DISCONNECTED, std::memory_order_relaxed);
+  }
   UpdateServerState();
 }
 

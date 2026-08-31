@@ -41,7 +41,6 @@ async function exeCmd(cmd: string) {
   return new Promise<string>((resolve, reject) => {
     child_process.exec(
       cmd,
-      { windowsHide: true },
       (error: ExecException | null, stdout: string, stderr: string) => {
         if (error == null) {
           resolve(stdout);

@@ -14,8 +14,13 @@ class SocketServerPosix : public SocketServer {
  public:
   explicit SocketServerPosix(
       const std::shared_ptr<SocketServerConnectionListener> &listener);
+  ~SocketServerPosix() override;
 
  private:
+#if defined(TESTING)
+  friend class SocketServerPosixTestPeer;
+#endif
+
   inline int GetErrorMessage() override { return errno; }
   int32_t InitSocket();
   void Start() override;

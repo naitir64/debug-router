@@ -5,6 +5,8 @@
 #ifndef DEBUGROUTER_NATIVE_SOCKET_USB_CLIENT_H_
 #define DEBUGROUTER_NATIVE_SOCKET_USB_CLIENT_H_
 
+#include <atomic>
+
 #include "debug_router/native/base/socket_guard.h"
 #include "debug_router/native/socket/blocking_queue.h"
 #include "debug_router/native/socket/count_down_latch.h"
@@ -37,7 +39,35 @@ class UsbClient : public std::enable_shared_from_this<UsbClient> {
 
   void SetConnectStatus(USBConnectStatus status);
 
+#ifdef TESTING
+  void SetListenerForTest(const std::shared_ptr<UsbClientListener> &listener) {
+    listener_ = listener;
+  }
+
+  void SetConnectedForTest(bool connected) {
+    is_connected_.store(connected, std::memory_order_relaxed);
+  }
+
+  void NotifyCloseForTest(int32_t code, const std::string &reason) {
+    NotifyCloseOnce(code, reason);
+  }
+
+  void SubmitWorkForTest(std::function<void()> task) {
+    work_thread_.submit(std::move(task));
+  }
+#endif
+
  private:
+  enum class ReadResult {
+    kOk,
+    kClosed,
+    kStopped,
+    kError,
+  };
+
+  void BeginTransportShutdown();
+  void NotifyErrorOnce(int32_t code, const std::string &message);
+  void NotifyCloseOnce(int32_t code, const std::string &reason);
   void StartInternal(const std::shared_ptr<UsbClientListener> &listener);
   // Marks the client as stopping before closing the socket so read/write loops
   // can exit even if DisconnectInternal() is called outside Stop() later.
@@ -51,8 +81,7 @@ class UsbClient : public std::enable_shared_from_this<UsbClient> {
   void MessageDispatcher();
   void WriteMessage();
 
-  bool Read(char *buffer, uint32_t read_size);
-  bool ReadAndCheckMessageHeader(char *header);
+  ReadResult Read(char *buffer, uint32_t read_size, int32_t *error_code);
 
   void CloseClientSocket(SocketType socket_fd_);
   /**
@@ -93,7 +122,7 @@ class UsbClient : public std::enable_shared_from_this<UsbClient> {
   base::WorkThreadExecutor write_thread_;
   base::WorkThreadExecutor dispatch_thread_;
   std::shared_ptr<UsbClientListener> listener_;
-  USBConnectStatus connect_status_ = USBConnectStatus::DISCONNECTED;
+  std::atomic<USBConnectStatus> connect_status_{USBConnectStatus::DISCONNECTED};
   std::unique_ptr<CountDownLatch> latch_;
 
   base::SocketGuard socket_guard_;
@@ -104,6 +133,10 @@ class UsbClient : public std::enable_shared_from_this<UsbClient> {
   std::atomic<bool> stopping_ = {false};
   // Guards the full Stop() sequence so shutdown executes only once.
   std::atomic<bool> stop_started_ = {false};
+  // Avoids reporting the same transport failure from both read and write loops.
+  std::atomic<bool> failure_reported_ = {false};
+  // Keeps OnClose independent from OnError so both callbacks can fire once.
+  std::atomic<bool> closed_reported_ = {false};
 };
 
 }  // namespace socket_server

@@ -55,6 +55,8 @@ source_set("debug_router_source") {
     "../native/core/message_transceiver.h",
     "../native/core/native_slot.cc",
     "../native/core/native_slot.h",
+    "../native/core/session_filter_util.cc",
+    "../native/core/session_filter_util.h",
     "../native/core/util.cc",
     "../native/core/util.h",
     "../native/log/logging.cc",

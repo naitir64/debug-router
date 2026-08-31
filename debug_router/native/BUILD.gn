@@ -42,6 +42,8 @@ source_set("debug_router_core") {
     "core/message_transceiver.h",
     "core/native_slot.cc",
     "core/native_slot.h",
+    "core/session_filter_util.cc",
+    "core/session_filter_util.h",
     "core/util.cc",
     "core/util.h",
     "log/logging.cc",

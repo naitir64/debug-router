@@ -14,6 +14,7 @@ class SocketServerWin : public SocketServer {
  public:
   SocketServerWin(
       const std::shared_ptr<SocketServerConnectionListener> &listener);
+  ~SocketServerWin() override;
 
  private:
   inline int GetErrorMessage() override { return WSAGetLastError(); }

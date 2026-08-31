@@ -1,4 +1,4 @@
-// Copyright 2024 The Lynx Authors. All rights reserved.
+// Copyright 2026 The Lynx Authors. All rights reserved.
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
@@ -38,6 +38,7 @@ export function monitorUnregisterDevice(device: BaseDevice, retryTime: number) {
   }
 }
 
+// add harmony device type check
 function getDeviceType(device: BaseDevice): string {
   if (device instanceof AndroidDevice) {
     return "Android";
@@ -70,6 +71,8 @@ export function setClientTimeMap(client: UsbClient) {
   });
 }
 
+// move the position of delete clientTimeMap after check clientTime
+// to ensure clientTimeMap state in sync
 export function monitorUnregisterClient(client: UsbClient, retryTime: number) {
   const currentTime = new Date().getTime();
   const clientTime = clientTimeMap.get(client.clientId());

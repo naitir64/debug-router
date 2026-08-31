@@ -4,8 +4,8 @@
 
 #include "debug_router/native/net/websocket_task.h"
 
+#include "debug_router/native/core/session_filter_util.h"
 #include "debug_router/native/core/util.h"
-#include "debug_router/native/log/logging.h"
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -77,7 +77,20 @@ WebSocketTask::WebSocketTask(
 
 WebSocketTask::~WebSocketTask() { shutdown(); }
 
+void WebSocketTask::BeginTransportShutdown() {
+  stopping_.store(true, std::memory_order_relaxed);
+  if (socket_guard_) {
+    socket_guard_->ShutdownAndReset();
+  }
+}
+
 void WebSocketTask::SendInternal(const std::string &data) {
+  if (stopping_.load(std::memory_order_relaxed) ||
+      (socket_guard_ &&
+       socket_guard_->Get() == socket_server::kInvalidSocket)) {
+    LOGI("WebSocketTask::SendInternal: dropping send for closed connection.");
+    return;
+  }
   const char *buf = data.data();
   size_t payloadLen = data.size();
   uint8_t prefix[14];
@@ -118,17 +131,16 @@ void WebSocketTask::SendInternal(const std::string &data) {
   } else {
     LOGI("WebSocketTask: [TX]: " << buf);
   }
-  if (send(socket_guard_->Get(), (char *)prefix, prefix_len, 0) == -1) {
-    LOGI("send prefix_len error.");
+  if (base::SendNoSigPipe(socket_guard_->Get(), prefix, prefix_len) == -1) {
+    LOGE("send prefix_len error.");
     onFailure("Send prefix_len error.", GetErrorMessage());
     return;
   }
-  if (send(socket_guard_->Get(), buf, payloadLen, 0) == -1) {
-    LOGI("send buf error.");
+  if (base::SendNoSigPipe(socket_guard_->Get(), buf, payloadLen) == -1) {
+    LOGE("send buf error.");
     onFailure("Send buf error.", GetErrorMessage());
     return;
   }
-  LOGI("send: prefix_len and buf success.");
 }
 
 void WebSocketTask::Start() {
@@ -136,8 +148,12 @@ void WebSocketTask::Start() {
 }
 
 void WebSocketTask::StartInternal() {
+  stopping_.store(false, std::memory_order_relaxed);
+  failure_reported_.store(false, std::memory_order_relaxed);
+  closed_reported_.store(false, std::memory_order_relaxed);
+  is_connected_.store(false, std::memory_order_relaxed);
   if (!do_connect()) {
-    LOGI("Websocket connect failed.");
+    LOGE("Websocket connect failed.");
     return;
   }
 
@@ -146,25 +162,26 @@ void WebSocketTask::StartInternal() {
   std::string msg;
   while (do_read(msg)) {
     LOGI("[RX]:" << msg);
+    if (core::internal::ShouldDropIncomingBySessionFilter(msg, "WebSocket")) {
+      continue;
+    }
     onMessage(msg);
   }
 
-  if (is_connected_.load(std::memory_order_relaxed)) {
-    onClose();
-  }
+  // StartInternal resets closed_reported_ before every connect attempt, so the
+  // unconditional onClose() here is safe: pre-open failures still stay silent
+  // because NotifyClosedOnce() also checks is_connected_.
+  onClose();
 }
 
 void WebSocketTask::Stop() {
   LOGI("WebSocketTask::Stop");
-  socket_guard_->Reset();
-  if (is_connected_.load(std::memory_order_relaxed)) {
-    onClose();
-  }
+  BeginTransportShutdown();
+  NotifyClosedOnce();
   shutdown();
 }
 
 bool WebSocketTask::do_connect() {
-  LOGI("WebSocketTask::do_connect");
   url_ = util::decodeURIComponent(url_);
   const char *purl = url_.c_str();
   if (memcmp(purl, "wss://", 6) == 0) {
@@ -292,7 +309,7 @@ bool WebSocketTask::do_connect() {
            "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==\r\n"
            "Sec-WebSocket-Version: 13\r\n\r\n",
            path, host, port);
-  if (send(socket_guard_->Get(), buf, strlen(buf), 0) == -1) {
+  if (base::SendNoSigPipe(socket_guard_->Get(), buf, strlen(buf)) == -1) {
     LOGE("send http upgrade error: " << GetErrorMessage());
     onFailure("Websocket Task: socket send failed.", GetErrorMessage());
     return false;
@@ -394,12 +411,14 @@ bool WebSocketTask::do_read(std::string &msg) {
               GetErrorMessage());
     return false;
   }
-  LOGI("WebSocketTask::do_read websocket message success.");
   return true;
 }
 
 void WebSocketTask::onOpen() {
   LOGI("WebSocketTask::onOpen");
+  if (stopping_.load(std::memory_order_relaxed)) {
+    return;
+  }
   is_connected_.store(true, std::memory_order_relaxed);
   auto transceiver = transceiver_.lock();
   if (transceiver) {
@@ -410,17 +429,36 @@ void WebSocketTask::onOpen() {
 void WebSocketTask::onFailure(const std::string &error_message,
                               int error_code) {
   LOGI("WebSocketTask::onFailure with error_code.");
+  BeginTransportShutdown();
+  NotifyFailureOnce(error_message, error_code);
+  NotifyClosedOnce();
+}
+
+void WebSocketTask::NotifyFailureOnce(const std::string &error_message,
+                                      int error_code) {
+  bool expected = false;
+  if (!failure_reported_.compare_exchange_strong(expected, true,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+    return;
+  }
   auto transceiver = transceiver_.lock();
   if (transceiver) {
     transceiver->delegate()->OnFailure(transceiver, error_message, error_code);
   }
 }
 
-void WebSocketTask::onClose() {
-  LOGI("WebSocketTask::onClose with error_message.");
-  bool expected = true;
-  if (!is_connected_.compare_exchange_strong(expected, false,
-                                             std::memory_order_relaxed)) {
+void WebSocketTask::NotifyClosedOnce() {
+  bool expected = false;
+  // First gate ensures only one path can attempt close delivery. The
+  // subsequent is_connected_ exchange keeps the pre-open case silent, which is
+  // required for Stop/Failure-before-open races.
+  if (!closed_reported_.compare_exchange_strong(expected, true,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+    return;
+  }
+  if (!is_connected_.exchange(false, std::memory_order_relaxed)) {
     return;
   }
   auto transceiver = transceiver_.lock();
@@ -429,8 +467,12 @@ void WebSocketTask::onClose() {
   }
 }
 
+void WebSocketTask::onClose() {
+  LOGI("WebSocketTask::onClose with error_message.");
+  NotifyClosedOnce();
+}
+
 void WebSocketTask::onMessage(const std::string &msg) {
-  LOGI("WebSocketTask::onMessage");
   auto transceiver = transceiver_.lock();
   if (transceiver) {
     transceiver->delegate()->OnMessage(msg, transceiver);

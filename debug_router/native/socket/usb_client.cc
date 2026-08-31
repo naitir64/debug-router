@@ -7,11 +7,10 @@
 #include <chrono>
 
 #include "debug_router/native/core/debug_router_core.h"
+#include "debug_router/native/core/session_filter_util.h"
 #include "debug_router/native/core/util.h"
 #include "debug_router/native/log/logging.h"
 #include "debug_router/native/socket/socket_server_api.h"
-#include "third_party/jsoncpp/include/json/reader.h"
-#include "third_party/jsoncpp/include/json/value.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -42,8 +41,6 @@ int GetErrorMessage() {
 }
 
 UsbClient::UsbClient(SocketType socket_fd) : socket_guard_(socket_fd) {
-  LOGI("UsbClient: Constructor.");
-
   // Set SO_RCVTIMEO to avoid permanent blocking
   SocketType sock = socket_guard_.Get();
   if (sock != kInvalidSocket) {
@@ -65,10 +62,47 @@ UsbClient::UsbClient(SocketType socket_fd) : socket_guard_(socket_fd) {
   }
 }
 
+void UsbClient::BeginTransportShutdown() {
+  stopping_.store(true, std::memory_order_relaxed);
+  connect_status_.store(USBConnectStatus::DISCONNECTED,
+                        std::memory_order_relaxed);
+  incoming_message_queue_.put(std::string(kMessageQuit));
+  outgoing_message_queue_.put(std::string(kMessageQuit));
+  socket_guard_.ShutdownAndReset();
+}
+
+void UsbClient::NotifyErrorOnce(int32_t code, const std::string &message) {
+  bool expected = false;
+  if (!failure_reported_.compare_exchange_strong(expected, true,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+    return;
+  }
+  if (listener_) {
+    listener_->OnError(shared_from_this(), code, message);
+  }
+}
+
+void UsbClient::NotifyCloseOnce(int32_t code, const std::string &reason) {
+  bool expected = false;
+  // First gate ensures only one path can attempt close delivery. The
+  // subsequent is_connected_ exchange keeps the pre-open case silent, which is
+  // required for Stop/Close-before-open races.
+  if (!closed_reported_.compare_exchange_strong(expected, true,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+    return;
+  }
+  if (!is_connected_.exchange(false, std::memory_order_relaxed)) {
+    return;
+  }
+  if (listener_) {
+    listener_->OnClose(shared_from_this(), code, reason);
+  }
+}
+
 void UsbClient::SetConnectStatus(USBConnectStatus status) {
-  work_thread_.submit([client_ptr = shared_from_this(), status]() {
-    client_ptr->connect_status_ = status;
-  });
+  connect_status_.store(status, std::memory_order_relaxed);
 }
 
 void UsbClient::Init() {
@@ -79,7 +113,6 @@ void UsbClient::Init() {
 }
 
 void UsbClient::StartUp(const std::shared_ptr<UsbClientListener> &listener) {
-  LOGI("UsbClient: StartUp.");
   work_thread_.submit([client_ptr = shared_from_this(), listener]() {
     client_ptr->StartInternal(listener);
   });
@@ -87,21 +120,15 @@ void UsbClient::StartUp(const std::shared_ptr<UsbClientListener> &listener) {
 
 void UsbClient::StartInternal(
     const std::shared_ptr<UsbClientListener> &listener) {
-  LOGI("UsbClient: StartInternal.");
   stopping_.store(false, std::memory_order_relaxed);
-  connect_status_ = USBConnectStatus::CONNECTING;
+  failure_reported_.store(false, std::memory_order_relaxed);
+  closed_reported_.store(false, std::memory_order_relaxed);
+  connect_status_.store(USBConnectStatus::CONNECTING,
+                        std::memory_order_relaxed);
   LOGI("StartInternal, listener is:" << listener.get());
   listener_ = listener;
   StartReader();
   StartWriter();
-}
-
-bool UsbClient::ReadAndCheckMessageHeader(char *header) {
-  if (!Read(header, kFrameHeaderLen)) {
-    LOGE("read header data error.");
-    return false;
-  }
-  return util::CheckHeaderThreeBytes(header);
 }
 
 /**
@@ -132,20 +159,33 @@ bool UsbClient::ReadAndCheckMessageHeader(char *header) {
  *  checkMessageHeader will check header's value.
  */
 
-bool UsbClient::Read(char *buffer, uint32_t read_size) {
+UsbClient::ReadResult UsbClient::Read(char *buffer, uint32_t read_size,
+                                      int32_t *error_code) {
+  if (error_code) {
+    *error_code = 0;
+  }
   int64_t start = 0;
   while (start < read_size) {
     int64_t read_data_len =
         recv(socket_guard_.Get(), buffer + start, read_size - start, 0);
-    if (read_data_len <= 0) {
+    if (read_data_len == 0) {
+      if (stopping_.load(std::memory_order_relaxed)) {
+        LOGI("Read: peer closed while stopping, exit read loop");
+        return ReadResult::kStopped;
+      }
+      LOGI("Read: peer closed connection (EOF)"
+           << " read target count:" << (read_size - start));
+      return ReadResult::kClosed;
+    }
+    if (read_data_len < 0) {
       // Check if it's a timeout error
 #ifdef _WIN32
       int error = WSAGetLastError();
       if (error == WSAEWOULDBLOCK || error == WSAETIMEDOUT) {
         // Timeout, check if we're stopping
         if (stopping_.load(std::memory_order_relaxed)) {
-          LOGE("Read: stopping, exit read loop");
-          return false;
+          LOGI("Read: stopping after recv timeout, exit read loop");
+          return ReadResult::kStopped;
         }
         // Continue to next iteration to check again
         continue;
@@ -155,50 +195,85 @@ bool UsbClient::Read(char *buffer, uint32_t read_size) {
       if (error == EAGAIN || error == EWOULDBLOCK || error == ETIMEDOUT) {
         // Timeout, check if we're stopping
         if (stopping_.load(std::memory_order_relaxed)) {
-          LOGE("Read: stopping, exit read loop");
-          return false;
+          LOGI("Read: stopping after recv timeout, exit read loop");
+          return ReadResult::kStopped;
         }
         // Continue to next iteration to check again
         continue;
       }
 #endif
+      if (stopping_.load(std::memory_order_relaxed)) {
+        LOGI("Read: stopping after socket error, exit read loop");
+        return ReadResult::kStopped;
+      }
       LOGE("Read: read_data_len <= 0 :"
-           << "read target count:" << (read_size - start) << " read_data_len:"
-           << read_data_len << " error:" << GetErrorMessage());
-      return false;
+           << "read target count:" << (read_size - start)
+           << " read_data_len:" << read_data_len << " error:" << error);
+      if (error_code) {
+        *error_code = error;
+      }
+      return ReadResult::kError;
     }
     start = start + read_data_len;
   }
   if (start != read_size) {
     LOGE("Read: read data count > read_size");
-    return false;
+    return ReadResult::kError;
   }
-  return true;
+  return ReadResult::kOk;
 }
 
 void UsbClient::ReadMessage() {
   LOGI("UsbClient: ReadMessage:" << socket_guard_.Get());
   bool isFirst = true;
+  int32_t close_code = 0;
+  std::string close_reason = "ReadMessage finished";
   while (true) {
     // Check if we're stopping
     if (stopping_.load(std::memory_order_relaxed)) {
       LOGI("UsbClient: ReadMessage: stopping, exit loop");
+      close_reason = "ReadMessage stopped";
       break;
     }
 
     char header[kFrameHeaderLen];
     memset(header, 0, kFrameHeaderLen);
     LOGI("UsbClient: start check message header.");
-    if (!ReadAndCheckMessageHeader(header)) {
+    int32_t error_code = 0;
+    ReadResult header_result = Read(header, kFrameHeaderLen, &error_code);
+    if (header_result == ReadResult::kStopped) {
+      close_reason = "ReadMessage stopped";
+      break;
+    }
+    if (header_result == ReadResult::kClosed) {
+      LOGI("UsbClient: peer closed connection before next frame.");
+      BeginTransportShutdown();
+      close_reason = "peer closed connection (EOF)";
+      break;
+    }
+    if (header_result == ReadResult::kError) {
+      LOGE("read header data error.");
+      BeginTransportShutdown();
+      close_code = error_code;
+      close_reason = "ReadMessage finished after socket error";
+      if (!isFirst) {
+        NotifyErrorOnce(error_code, "ReadMessage header read socket error");
+      }
+      break;
+    }
+    if (!util::CheckHeaderThreeBytes(header)) {
       LOGW("UsbClient: don't match DebugRouter protocol:");
       // need DebugRouterReport to report invailed client.
       for (int i = 0; i < kFrameHeaderLen; i++) {
         LOGE("header " << i << " : #" << util::CharToUInt32(header[i]) << "#");
       }
-      if (!isFirst && listener_) {
-        listener_->OnError(shared_from_this(), GetErrorMessage(),
-                           "ReadAndCheckMessageHeader error: don't match "
-                           "DebugRouter protocol");
+      BeginTransportShutdown();
+      close_code = GetErrorMessage();
+      close_reason = "ReadMessage finished after protocol mismatch";
+      if (!isFirst) {
+        NotifyErrorOnce(close_code,
+                        "ReadAndCheckMessageHeader error: don't match "
+                        "DebugRouter protocol");
       }
       break;
     }
@@ -212,12 +287,24 @@ void UsbClient::ReadMessage() {
       isFirst = false;
     }
     char payload_size[kPayloadSizeLen];
-    if (!Read(payload_size, kPayloadSizeLen)) {
-      LOGE("read payload data error: " << GetErrorMessage());
-      if (listener_) {
-        listener_->OnError(shared_from_this(), GetErrorMessage(),
-                           "read payload size data error.");
-      }
+    ReadResult payload_size_result =
+        Read(payload_size, kPayloadSizeLen, &error_code);
+    if (payload_size_result == ReadResult::kStopped) {
+      close_reason = "ReadMessage stopped";
+      break;
+    }
+    if (payload_size_result == ReadResult::kClosed) {
+      LOGI("read payload size hit EOF");
+      BeginTransportShutdown();
+      close_reason = "peer closed connection (EOF)";
+      break;
+    }
+    if (payload_size_result == ReadResult::kError) {
+      LOGE("read payload size data error: " << error_code);
+      BeginTransportShutdown();
+      close_code = error_code;
+      close_reason = "ReadMessage finished after payload-size read error";
+      NotifyErrorOnce(error_code, "read payload size data error.");
       break;
     }
 
@@ -232,62 +319,45 @@ void UsbClient::ReadMessage() {
       continue;
     }
     std::unique_ptr<char[]> payload(new char[payload_size_int]);
-    if (!Read(payload.get(), payload_size_int)) {
-      LOGI("read payload data error: " << GetErrorMessage());
-      if (listener_) {
-        listener_->OnError(shared_from_this(), GetErrorMessage(),
-                           "read payload data error:");
-      }
+    ReadResult payload_result =
+        Read(payload.get(), payload_size_int, &error_code);
+    if (payload_result == ReadResult::kStopped) {
+      close_reason = "ReadMessage stopped";
+      break;
+    }
+    if (payload_result == ReadResult::kClosed) {
+      LOGI("read payload hit EOF");
+      BeginTransportShutdown();
+      close_reason = "peer closed connection (EOF)";
+      break;
+    }
+    if (payload_result == ReadResult::kError) {
+      LOGI("read payload data error: " << error_code);
+      BeginTransportShutdown();
+      close_code = error_code;
+      close_reason = "ReadMessage finished after payload read error";
+      NotifyErrorOnce(error_code, "read payload data error:");
       break;
     }
 
     std::string payload_str(payload.get(), payload_size_int);
 
     LOGI("[RX]:" << payload_str);
-
-    // Check if all sessions are enabled
-    bool enable_all_sessions =
-        core::DebugRouterCore::GetInstance().isEnableAllSessions();
-
-    // Only parse JSON if not all sessions are enabled
-    if (!enable_all_sessions) {
-      // get sessionID from payload_str
-      int32_t session_id = -1;
-      Json::Reader reader;
-      Json::Value root;
-      if (reader.parse(payload_str, root)) {
-        if (root.isObject() && root["data"].isObject() &&
-            root["data"]["data"].isObject()) {
-          const Json::Value &session_id_value =
-              root["data"]["data"]["session_id"];
-          if (session_id_value.isNumeric()) {
-            session_id = session_id_value.asInt();
-          }
-        }
-      }
-      LOGI("Extracted session_id: " << session_id);
-      if (session_id > 0 &&
-          !core::DebugRouterCore::GetInstance().isActiveSession(session_id)) {
-        LOGW("Drop message for inactive session_id: " << session_id);
-        continue;
-      }
+    if (core::internal::ShouldDropIncomingBySessionFilter(payload_str, "USB")) {
+      continue;
     }
 
     incoming_message_queue_.put(std::move(payload_str));
   }
   // end read loop.
   LOGI("UsbClient: ReadMessage finished.");
-  if (listener_ && is_connected_.exchange(false, std::memory_order_relaxed)) {
-    listener_->OnClose(shared_from_this(), GetErrorMessage(),
-                       "ReadMessage finished");
-  }
+  NotifyCloseOnce(close_code, close_reason);
   LOGI("UsbClient: ReadMessage thread exit.");
   incoming_message_queue_.put(std::move(kMessageQuit));
   outgoing_message_queue_.put(std::move(kMessageQuit));
 }
 
 void UsbClient::StartReader() {
-  LOGI("UsbClient: start reader thread.");
   StartMessageDispatcher();
   read_thread_.submit(
       [client_ptr = shared_from_this()]() { client_ptr->ReadMessage(); });
@@ -305,19 +375,13 @@ void UsbClient::MessageDispatcher() {
 
     if (message.length() > 0) {
       if (listener_) {
-        LOGI("UsbClient: listener exists, do OnMessage.");
         listener_->OnMessage(shared_from_this(), message);
       }
-    } else {
-      LOGI("UsbClient: MessageDispatcherFunc receive empty message.");
     }
   }
-  LOGI("UsbClient: message dispatcher finished.");
 }
 
 void UsbClient::StartMessageDispatcher() {
-  LOGI("UsbClient: startMessageDispatcher.");
-
   dispatch_thread_.submit(
       [client_ptr = shared_from_this()]() { client_ptr->MessageDispatcher(); });
 }
@@ -361,37 +425,9 @@ void UsbClient::WriteMessage() {
     message = outgoing_message_queue_.take();
 
     if (message == kMessageQuit) {
-      LOGI("UsbClient: WriteMessage receive MESSAGE_QUIT.");
       break;
     }
 
-    // Check if all sessions are enabled
-    bool enable_all_sessions =
-        core::DebugRouterCore::GetInstance().isEnableAllSessions();
-
-    // Only parse JSON if not all sessions are enabled
-    if (!enable_all_sessions) {
-      int32_t session_id = -1;
-      // get sessionID from message
-      Json::Reader reader;
-      Json::Value root;
-      if (reader.parse(message, root)) {
-        if (root.isObject() && root["data"].isObject() &&
-            root["data"]["data"].isObject()) {
-          const Json::Value &session_id_value =
-              root["data"]["data"]["session_id"];
-          if (session_id_value.isNumeric()) {
-            session_id = session_id_value.asInt();
-          }
-        }
-      }
-      LOGI("Extracted session_id: " << session_id);
-      if (session_id > 0 &&
-          !core::DebugRouterCore::GetInstance().isActiveSession(session_id)) {
-        LOGW("Drop message for inactive session_id: " << session_id);
-        continue;
-      }
-    }
     if (message.length() > 0) {
       if (message.find("Page.screencastFrame") != std::string::npos) {
         LOGI("UsbClient: [TX]: Page.screencastFrame Sent.");
@@ -403,45 +439,40 @@ void UsbClient::WriteMessage() {
       }
       std::string result_message;
       WrapHeader(message, result_message);
-      if (send(socket_guard_.Get(), result_message.c_str(),
-               result_message.size(), 0) == -1) {
+      if (base::SendNoSigPipe(socket_guard_.Get(), result_message.c_str(),
+                              result_message.size()) == -1) {
         LOGE("send error: " << GetErrorMessage() << " message:" << message);
-        if (listener_) {
-          listener_->OnError(shared_from_this(), GetErrorMessage(),
-                             "UsbClient::WriteMessage send data failed.");
-        }
+        BeginTransportShutdown();
+        NotifyErrorOnce(GetErrorMessage(),
+                        "UsbClient::WriteMessage send data failed.");
+        NotifyCloseOnce(GetErrorMessage(), "writer thread finished");
         break;
       }
-    } else {
-      LOGI("UsbClient: WriteMessage receive empty message.");
     }
   }
   LOGI("UsbClient: WriteMessage finished.");
-  if (listener_ && is_connected_.exchange(false, std::memory_order_relaxed)) {
-    listener_->OnClose(shared_from_this(), GetErrorMessage(),
-                       "writer thread finished");
-  }
+  NotifyCloseOnce(GetErrorMessage(), "writer thread finished");
   LOGI("UsbClient: WriteMessage thread exit.");
 }
 
 void UsbClient::StartWriter() {
-  LOGI("UsbClient: start writer thread.");
   write_thread_.submit(
       [client_ptr = shared_from_this()]() { client_ptr->WriteMessage(); });
 }
 
 void UsbClient::DisconnectInternal() {
-  LOGI("UsbClient: DisconnectInternal.");
   // DisconnectInternal only handles transport/read-loop shutdown. Stop()
   // idempotence is guarded by stop_started_.
-  stopping_.store(true, std::memory_order_relaxed);
-  incoming_message_queue_.put(std::move(kMessageQuit));
-  outgoing_message_queue_.put(std::move(kMessageQuit));
-  socket_guard_.Reset();
+  BeginTransportShutdown();
 }
 
 bool UsbClient::Send(const std::string &message) {
   LOGI("UsbClient: Send.");
+  if (stopping_.load(std::memory_order_relaxed) ||
+      stop_started_.load(std::memory_order_relaxed)) {
+    LOGI("UsbClient: dropping send while stopping.");
+    return false;
+  }
   if (message.size() >
       (kMaxMessageLength - kFrameHeaderLen - kPayloadSizeLen)) {
     LOGE("current protocol only support 1UL << 32 bytes message");
@@ -454,7 +485,6 @@ bool UsbClient::Send(const std::string &message) {
 }
 
 void UsbClient::Stop() {
-  LOGI("UsbClient: Stop.");
   bool expected = false;
   if (!stop_started_.compare_exchange_strong(expected, true,
                                              std::memory_order_acq_rel,
@@ -464,25 +494,16 @@ void UsbClient::Stop() {
   }
 
   auto start_time = std::chrono::steady_clock::now();
-
-  LOGI("UsbClient: Stop - begin DisconnectInternal");
   DisconnectInternal();
-
-  LOGI("UsbClient: Stop - begin dispatch_thread shutdown");
   dispatch_thread_.shutdown();
-
-  LOGI("UsbClient: Stop - begin write_thread shutdown");
   write_thread_.shutdown();
-
-  LOGI("UsbClient: Stop - begin read_thread shutdown");
   read_thread_.shutdown();
-
-  LOGI("UsbClient: Stop - begin work_thread shutdown");
   work_thread_.shutdown();
 
   incoming_message_queue_.clear();
   outgoing_message_queue_.clear();
-  connect_status_ = USBConnectStatus::DISCONNECTED;
+  connect_status_.store(USBConnectStatus::DISCONNECTED,
+                        std::memory_order_relaxed);
 
   auto end_time = std::chrono::steady_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -493,7 +514,9 @@ void UsbClient::Stop() {
 
 void UsbClient::SendInternal(const std::string &message) {
   LOGI("UsbClient: SendInternal.");
-  if (connect_status_ != USBConnectStatus::CONNECTED) {
+  if (stopping_.load(std::memory_order_relaxed) ||
+      connect_status_.load(std::memory_order_relaxed) !=
+          USBConnectStatus::CONNECTED) {
     LOGI("current usb client is not connected:" << message);
     return;
   }
@@ -501,10 +524,7 @@ void UsbClient::SendInternal(const std::string &message) {
   outgoing_message_queue_.put(std::move(non_const_message));
 }
 
-UsbClient::~UsbClient() {
-  LOGI("UsbClient: ~UsbClient.");
-  Stop();
-}
+UsbClient::~UsbClient() { Stop(); }
 
 }  // namespace socket_server
 }  // namespace debugrouter

@@ -2,30 +2,30 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
-import {
-  SocketEvents,
-  decodeSocketMessage,
-  IClientDescriptor,
-  encodeSocketMessage,
-  ITypedSocketMessage,
-  isTypedSocketMessage,
-} from "../../proxy";
-
 import { v4 } from "uuid";
+
+import {
+  decodeSocketMessage,
+  encodeSocketMessage,
+  IClientDescriptor,
+  isTypedSocketMessage,
+  ITypedSocketMessage,
+  SocketEvents,
+} from "../../proxy";
 import {
   ERemoteDebugDriverEventNames,
+  ERemoteDebugDriverExternalEvent,
   IRemoteDebugDriverEvent2Payload,
-  IWebSocketClient,
+  IRemoteDebugDriverProxy,
   IRemoteDebugServer4Driver,
   IRemoteDebugServerDriverOption,
-  IRemoteDebugDriverProxy,
-  ERemoteDebugDriverExternalEvent,
+  IWebSocketClient,
 } from "../interface";
 import {
-  isTypedCustomData,
+  createCustomData,
   ECustomDataType,
   ICustomDataWrapper,
-  createCustomData,
+  isTypedCustomData,
 } from "../interface/custom";
 
 const enum ERemoteDebugDriverStatus {
@@ -168,8 +168,10 @@ export class RemoteDebugDriver implements IRemoteDebugServer4Driver {
     );
   }
   public stop() {
-    this.client?.close?.();
-    return new Promise<any>((r) => r);
+    const client = this.client;
+    this.client = undefined;
+    client?.close?.();
+    return Promise.resolve();
   }
   public on<T extends ERemoteDebugDriverEventNames>(
     name: T,
@@ -210,7 +212,7 @@ export class RemoteDebugDriver implements IRemoteDebugServer4Driver {
       type: this.clientType,
     };
     if (this.clientType === "runtime") {
-      //for usbDebug
+      // for usbDebug
       deviceData.info = this.clientInfo;
     }
 
@@ -277,8 +279,8 @@ export class RemoteDebugDriver implements IRemoteDebugServer4Driver {
     const client_ids = Object.keys(this.sessionListRecord).map(($) => +$);
     let founded = false;
     for (const client_id of client_ids) {
-      const sessions: ICustomDataWrapper<ECustomDataType.SessionList> =
-        this.sessionListRecord[client_id];
+      const sessions: ICustomDataWrapper<ECustomDataType.SessionList> = this
+        .sessionListRecord[client_id];
       if (sessions) {
         for (const session of sessions.data) {
           const encodedSessionUrl = encodeURIComponent(session.url);

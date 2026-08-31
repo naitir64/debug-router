@@ -39,7 +39,7 @@ WebSocketClient::~WebSocketClient() { DisconnectInternal(); }
 void WebSocketClient::Init() { work_thread_.init(); }
 
 bool WebSocketClient::Connect(const std::string &url) {
-  LOGI("WebSocketClient::Connect");
+  LOGI("WebSocketClient::Connect, url=" << url);
   auto self = std::static_pointer_cast<WebSocketClient>(shared_from_this());
   work_thread_.submit([client_ptr = self, url]() {
     client_ptr->DisconnectInternal();
@@ -57,21 +57,18 @@ void WebSocketClient::StopServer() {
 }
 
 void WebSocketClient::ConnectInternal(const std::string &url) {
-  LOGI("WebSocketClient::ConnectInternal: use " << url << " to connect.");
   current_task_ = std::make_unique<WebSocketTask>(shared_from_this(), url);
   current_task_->init();
   current_task_->Start();
 }
 
 void WebSocketClient::Disconnect() {
-  LOGI("WebSocketClient::Disconnect");
   auto self = std::static_pointer_cast<WebSocketClient>(shared_from_this());
   work_thread_.submit(
       [client_ptr = self]() { client_ptr->DisconnectInternal(); });
 }
 
 void WebSocketClient::DisconnectInternal() {
-  LOGI("WebSocketClient::DisconnectInternal");
   if (current_task_) {
     current_task_->Stop();
     LOGI("WebSocketClient::DisconnectInternal: current_task_->Stop() success.");

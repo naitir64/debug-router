@@ -104,7 +104,6 @@ export class AndroidDeviceManager extends DeviceManager {
     }
 
     try {
-      await this.registerCurrentDevices();
       this.adbClient
         .trackDevices()
 
@@ -214,37 +213,6 @@ export class AndroidDeviceManager extends DeviceManager {
       });
       this.unregisterAllAndroidDevice();
       this.reWatchAndroidDevices();
-    }
-  }
-
-  private async registerCurrentDevices() {
-    if (!this.adbClient) {
-      return;
-    }
-
-    try {
-      const devices = await this.adbClient.listDevices();
-      for (const device of devices) {
-        if (device.type !== "device") {
-          continue;
-        }
-        if (!this.driver.devices.has(device.id)) {
-          this.driver.traceRecorder?.recordDevicePlug(device.id, {
-            os: "Android",
-            event: "list",
-            deviceType: device.type,
-          });
-        }
-        await this.registerDevice(this.adbClient, device);
-      }
-    } catch (e: any) {
-      const msg = "list android devices error:" + e?.message;
-      defaultLogger.debug(msg);
-      getDriverReportService()?.report("android_connect_error", null, {
-        msg,
-        stage: "device",
-        detail: "listDevices",
-      });
     }
   }
 

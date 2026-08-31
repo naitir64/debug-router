@@ -29,12 +29,27 @@ class WebSocketTask : public base::WorkThreadExecutor {
   void Start();
   void SendInternal(const std::string &data);
 
+#ifdef TESTING
+  void SetConnectedForTest(bool connected) {
+    is_connected_.store(connected, std::memory_order_relaxed);
+  }
+
+  void NotifyFailureForTest(const std::string &error_message, int error_code) {
+    onFailure(error_message, error_code);
+  }
+
+  void NotifyCloseForTest() { onClose(); }
+#endif
+
  private:
   void StartInternal();
+  void BeginTransportShutdown();
 
   bool do_connect();
   bool do_read(std::string &msg);
 
+  void NotifyFailureOnce(const std::string &error_message, int error_code);
+  void NotifyClosedOnce();
   void onOpen();
   void onFailure(const std::string &error_message, int error_code);
   void onClose();
@@ -45,6 +60,9 @@ class WebSocketTask : public base::WorkThreadExecutor {
   std::string url_;
   std::unique_ptr<base::SocketGuard> socket_guard_;
   std::atomic<bool> is_connected_ = {false};
+  std::atomic<bool> stopping_ = {false};
+  std::atomic<bool> failure_reported_ = {false};
+  std::atomic<bool> closed_reported_ = {false};
 };
 
 }  // namespace net

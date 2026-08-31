@@ -25,6 +25,8 @@ unittest_set("example_testset") {
     "../core/message_transceiver.h",
     "../core/native_slot.cc",
     "../core/native_slot.h",
+    "../core/session_filter_util.cc",
+    "../core/session_filter_util.h",
     "../core/util.cc",
     "../core/util.h",
     "../log/logging.cc",
@@ -72,7 +74,14 @@ unit_test("example_unittest") {
     "count_down_latch_unittest.cc",
     "debug_router_core_concurrency_unittest.cc",
     "example_source_unittest.cc",
+    "session_filter_util_unittest.cc",
+    "socket_server_posix_unittest.cc",
+    "socket_server_smoke_unittest.cc",
     "socket_util_unittest.cc",
+    "usb_client_unittest.cc",
+    "usb_reconnect_race_unittest.cc",
+    "websocket_task_unittest.cc",
+    "work_thread_executor_unittest.cc",
   ]
   deps = [ ":example_testset" ]
 }

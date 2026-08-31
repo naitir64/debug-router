@@ -405,7 +405,6 @@ export class PhysicalConnector {
   }
 
   unregiserUsbClient(id: number) {
-    // change a little bit
     const existing = this.usbClients.get(id);
     if (!existing) {
       defaultLogger.debug("unregiserUsbClient unknown id:" + id);
@@ -448,7 +447,6 @@ export class PhysicalConnector {
     setDeviceTimeMap(device);
   }
 
-  // clean up the execution order of this function
   waitDeviceUsbClients(
     deviceId: string,
     timeout: number = -1,

@@ -7,6 +7,7 @@ package com.lynx.debugrouter;
 import android.app.Application;
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.util.Log;
 import android.view.View;
@@ -406,12 +407,20 @@ public class DebugRouter {
     if (context == null) {
       return "";
     }
-    ConnectivityManager cm =
-        (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-    if (cm == null || cm.getActiveNetworkInfo() == null) {
+    try {
+      ConnectivityManager cm =
+          (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+      if (cm == null) {
+        return "";
+      }
+      NetworkInfo networkInfo = cm.getActiveNetworkInfo();
+      if (networkInfo == null) {
+        return "";
+      }
+      return networkInfo.getTypeName();
+    } catch (Throwable t) {
       return "";
     }
-    return cm.getActiveNetworkInfo().getTypeName();
   }
 
   private String getCurrentProcessName() {

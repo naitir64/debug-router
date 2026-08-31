@@ -20,18 +20,21 @@ SocketServerPosix::SocketServerPosix(
     const std::shared_ptr<SocketServerConnectionListener> &listener)
     : SocketServer(listener) {}
 
-int32_t SocketServerPosix::InitSocket() {
-  LOGI("start new");
+SocketServerPosix::~SocketServerPosix() { Close(); }
 
-  socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (socket_fd_ == kInvalidSocket) {
+int32_t SocketServerPosix::InitSocket() {
+  LOGI("SocketServerPosix::InitSocket");
+
+  const SocketType socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+  socket_fd_.store(socket_fd, std::memory_order_release);
+  if (socket_fd == kInvalidSocket) {
     LOGE("create socket error:" << GetErrorMessage());
     NotifyInit(GetErrorMessage(), "create socket error");
     return kInvalidPort;
   }
 
   int on = 1;
-  if (setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
+  if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
     Close();
     LOGE("setsockopt error:" << GetErrorMessage());
     NotifyInit(GetErrorMessage(), "setsockopt error");
@@ -48,7 +51,7 @@ int32_t SocketServerPosix::InitSocket() {
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (bind(socket_fd_, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+    if (bind(socket_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
       flag = true;
       break;
     }
@@ -65,7 +68,7 @@ int32_t SocketServerPosix::InitSocket() {
 
   LOGI("bind port:" << port);
 
-  if (listen(socket_fd_, kConnectionQueueMaxLength) != 0) {
+  if (listen(socket_fd, kConnectionQueueMaxLength) != 0) {
     Close();
     LOGE("listen error:" << GetErrorMessage());
     NotifyInit(GetErrorMessage(), "listen error");
@@ -75,19 +78,21 @@ int32_t SocketServerPosix::InitSocket() {
 }
 
 void SocketServerPosix::Start() {
-  if (socket_fd_ == kInvalidSocket) {
+  SocketType socket_fd = socket_fd_.load(std::memory_order_acquire);
+  if (socket_fd == kInvalidSocket) {
     int32_t port = kInvalidPort;
     port = InitSocket();
     if (port == kInvalidPort) {
       return;
     }
     NotifyInit(0, "port:" + std::to_string(port));
+    socket_fd = socket_fd_.load(std::memory_order_acquire);
   }
-  LOGI("server socket:" << socket_fd_);
+  LOGI("server socket:" << socket_fd);
   struct sockaddr_in addr;
   socklen_t addrLen = sizeof(addr);
   SocketType accept_socket_fd =
-      accept(socket_fd_, (struct sockaddr *)(&addr), &addrLen);
+      accept(socket_fd, (struct sockaddr *)(&addr), &addrLen);
   if (accept_socket_fd == kInvalidSocket) {
     Close();
     LOGE("accept socket error:" << GetErrorMessage());
@@ -95,16 +100,22 @@ void SocketServerPosix::Start() {
     return;
   }
   LOGI("accept usbclient socket:" << accept_socket_fd);
-  if (temp_usb_client_) {
-    LOGI("close last connector, destroy temp_usb_client_.");
-    temp_usb_client_->Stop();
-  }
+  std::shared_ptr<UsbClient> old_temp_client;
   LOGI("create a new usb client.");
-  temp_usb_client_ = std::make_shared<UsbClient>(accept_socket_fd);
+  auto new_temp_client = std::make_shared<UsbClient>(accept_socket_fd);
+  {
+    std::lock_guard<std::mutex> lock(client_lock_);
+    old_temp_client = temp_usb_client_;
+    temp_usb_client_ = new_temp_client;
+  }
+  if (old_temp_client) {
+    LOGI("close last connector, destroy temp_usb_client_.");
+    ScheduleClientStop(old_temp_client);
+  }
   std::shared_ptr<ClientListener> listener =
       std::make_shared<ClientListener>(shared_from_this());
-  temp_usb_client_->Init();
-  temp_usb_client_->StartUp(listener);
+  new_temp_client->Init();
+  new_temp_client->StartUp(listener);
 }
 
 void SocketServerPosix::CloseSocket(int socket_fd) {

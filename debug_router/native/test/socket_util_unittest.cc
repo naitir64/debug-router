@@ -2,10 +2,119 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
+#include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <set>
+#include <string>
+#include <thread>
 
+#include "debug_router/native/base/socket_guard.h"
+#include "debug_router/native/core/debug_router_core.h"
 #include "debug_router/native/core/util.h"
+#include "debug_router/native/socket/socket_server_type.h"
 #include "gtest/gtest.h"
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
+
+namespace {
+
+#ifndef _WIN32
+std::set<int32_t> ScanOccupiedDebugRouterPorts() {
+  std::set<int32_t> ports;
+  const int32_t end_port = debugrouter::socket_server::kStartPort +
+                           debugrouter::socket_server::kTryPortCount;
+  for (int32_t port = debugrouter::socket_server::kStartPort; port < end_port;
+       ++port) {
+    const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
+      continue;
+    }
+    int on = 1;
+    setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    errno = 0;
+    if (bind(socket_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) !=
+            0 &&
+        errno == EADDRINUSE) {
+      ports.insert(port);
+    }
+    close(socket_fd);
+  }
+  return ports;
+}
+
+template <class Predicate>
+bool WaitUntil(Predicate predicate, int timeout_ms = 2000) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return predicate();
+}
+
+std::string BuildUsbFrame(const std::string& payload) {
+  std::string frame(debugrouter::socket_server::kFrameHeaderLen +
+                        debugrouter::socket_server::kPayloadSizeLen +
+                        payload.size(),
+                    '\0');
+  debugrouter::util::IntToCharArray(
+      debugrouter::socket_server::kFrameProtocolVersion, frame.data());
+  debugrouter::util::IntToCharArray(
+      debugrouter::socket_server::kPTFrameTypeTextMessage, frame.data() + 4);
+  debugrouter::util::IntToCharArray(
+      debugrouter::socket_server::kFrameDefaultTag, frame.data() + 8);
+  debugrouter::util::IntToCharArray(
+      static_cast<uint32_t>(debugrouter::socket_server::kPayloadSizeLen +
+                            payload.size()),
+      frame.data() + 12);
+  debugrouter::util::IntToCharArray(static_cast<uint32_t>(payload.size()),
+                                    frame.data() + 16);
+  if (!payload.empty()) {
+    memcpy(frame.data() + debugrouter::socket_server::kFrameHeaderLen +
+               debugrouter::socket_server::kPayloadSizeLen,
+           payload.data(), payload.size());
+  }
+  return frame;
+}
+
+int ConnectToLocalUsbPort(int32_t port) {
+  const int client_socket = socket(AF_INET, SOCK_STREAM, 0);
+  if (client_socket < 0) {
+    return -1;
+  }
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (connect(client_socket, reinterpret_cast<sockaddr*>(&addr),
+              sizeof(addr)) != 0) {
+    close(client_socket);
+    return -1;
+  }
+
+  return client_socket;
+}
+#endif
+
+}  // namespace
 
 TEST(SocketUtilTestSuite, TestCharToUInt32) {
   EXPECT_EQ(debugrouter::util::CharToUInt32(0xF0), (uint32_t)240);
@@ -60,3 +169,83 @@ TEST(SocketUtilTestSuite, TestCheckHeader) {
   EXPECT_EQ(true, debugrouter::util::CheckHeaderThreeBytes(header));
   EXPECT_EQ(true, debugrouter::util::CheckHeaderFourthByte(header, 27));
 }
+
+#ifndef _WIN32
+TEST(SocketUtilTestSuite, SendNoSigPipeFailsWithoutTerminatingOnClosedPeer) {
+  int sockets[2] = {-1, -1};
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+
+  debugrouter::base::SocketGuard writer(sockets[0]);
+  ASSERT_EQ(close(sockets[1]), 0);
+
+  const char message[] = "x";
+  errno = 0;
+  auto result =
+      debugrouter::base::SendNoSigPipe(writer.Get(), message, sizeof(message));
+
+  EXPECT_EQ(result, -1);
+  EXPECT_EQ(errno, EPIPE);
+}
+
+TEST(SocketUtilTestSuite,
+     EnableSingleSessionDoesNotStartUsbServerUntilDebugChannelEnabled) {
+  const std::set<int32_t> ports_before = ScanOccupiedDebugRouterPorts();
+
+  auto& core = debugrouter::core::DebugRouterCore::GetInstance();
+  core.DisableDebugChannel();
+  core.EnableSingleSession(123);
+
+  EXPECT_TRUE(core.isActiveSession(123));
+  EXPECT_TRUE(WaitUntil([&ports_before]() {
+    return ScanOccupiedDebugRouterPorts() == ports_before;
+  }));
+
+  core.EnableDebugChannel();
+
+  std::set<int32_t> ports_after_enable;
+  ASSERT_TRUE(WaitUntil([&]() {
+    ports_after_enable = ScanOccupiedDebugRouterPorts();
+    return ports_after_enable.size() == ports_before.size() + 1;
+  }));
+
+  core.DisableDebugChannel();
+
+  EXPECT_TRUE(WaitUntil([&ports_before]() {
+    return ScanOccupiedDebugRouterPorts() == ports_before;
+  }));
+}
+
+TEST(
+    SocketUtilTestSuite,
+    DisableDebugChannelRestoresDisconnectedStateForSingleSessionUsbConnection) {
+  auto& core = debugrouter::core::DebugRouterCore::GetInstance();
+  core.DisableDebugChannel();
+
+  core.EnableSingleSession(123);
+  core.EnableDebugChannel();
+  int client_socket = -1;
+  ASSERT_TRUE(WaitUntil([&]() {
+    const int32_t usb_port = core.GetUSBPort();
+    if (usb_port == debugrouter::socket_server::kInvalidPort) {
+      return false;
+    }
+    client_socket = ConnectToLocalUsbPort(usb_port);
+    return client_socket >= 0;
+  }));
+
+  const std::string frame = BuildUsbFrame("");
+  ASSERT_EQ(send(client_socket, frame.data(), frame.size(), 0),
+            static_cast<ssize_t>(frame.size()));
+  ASSERT_TRUE(WaitUntil([&]() {
+    return core.GetConnectionState() == debugrouter::core::CONNECTED;
+  }));
+
+  core.DisableDebugChannel();
+  EXPECT_EQ(core.GetConnectionState(), debugrouter::core::DISCONNECTED);
+  EXPECT_TRUE(WaitUntil([&]() {
+    return core.GetConnectionState() == debugrouter::core::DISCONNECTED;
+  }));
+
+  close(client_socket);
+}
+#endif
