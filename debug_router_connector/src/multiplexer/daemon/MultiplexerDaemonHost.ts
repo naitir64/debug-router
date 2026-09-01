@@ -492,7 +492,7 @@ export class MultiplexerDaemonHost {
       case "startAllDeviceClientWatchers":
         return this.startWatchAllClients();
       case "stopAllDeviceClientWatchers":
-        return this.stopWatchAllClients();
+        return this.forceDisableAllClients();
       case "disconnectDevice":
         return this.disconnectDevice(
           message.params as ControlRpcParams["disconnectDevice"],
@@ -634,17 +634,14 @@ export class MultiplexerDaemonHost {
     );
   }
 
-  private async stopWatchAllClients(): Promise<void> {
+  private async forceDisableAllClients(): Promise<void> {
     await Promise.allSettled(
       Array.from(this.clientWatcherStartingByDeviceId.values()),
     );
     this.clientWatcherStartingByDeviceId.clear();
     this.clientWatcherStartedDeviceIds.clear();
-    await Promise.all(
-      Array.from(this.physicalConnector.devices.values(), (device) =>
-        device.stopWatchClient(),
-      ),
-    );
+    this.physicalConnector.disableAllClients();
+    this.getWebSocketAppClients()?.forEach((client) => client.close());
     this.publishClientSnapshot();
   }
 

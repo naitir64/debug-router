@@ -1835,13 +1835,22 @@ describe("MultiplexerDaemonHost", function () {
     ]);
   });
 
-  it("stopAllDeviceClientWatchers stops current watchers while auto-watching later devices", async function () {
+  it("stopAllDeviceClientWatchers force-disables current clients while auto-watching later devices", async function () {
     const { host, physical } = createHost();
     const firstDevice = createDevice("device-1");
     const secondDevice = createDevice("device-2");
     const laterDevice = createDevice("device-3");
+    const usbRuntime = createClient(7);
+    const wifiRuntime = createWebSocketClient(8, "runtime");
+    const driver = createWebSocketClient(9, "Driver");
+    const { controller } = createWebSocketControllerState(
+      [wifiRuntime],
+      [driver]
+    );
     physical.devices.set(firstDevice.serial, firstDevice);
     physical.devices.set(secondDevice.serial, secondDevice);
+    physical.usbClients.set(usbRuntime.clientId(), usbRuntime);
+    host.webSocketController = controller;
     attachControlServer(host);
     bindHostEvents(host);
 
@@ -1863,9 +1872,13 @@ describe("MultiplexerDaemonHost", function () {
       "device-2",
       "device-3",
     ]);
+    assert.strictEqual(physical.disableAllClientsCalls, 1);
     assert.strictEqual(firstDevice.state.stopWatchCalls, 1);
     assert.strictEqual(secondDevice.state.stopWatchCalls, 1);
     assert.strictEqual(laterDevice.state.startWatchCalls, 1);
+    assert.strictEqual(usbRuntime.state.closeCalls, 1);
+    assert.strictEqual(wifiRuntime.state.closeCalls, 1);
+    assert.strictEqual(driver.state.closeCalls, 0);
   });
 
   it("stopAllDeviceClientWatchers waits for an in-flight watcher before stopping it", async function () {

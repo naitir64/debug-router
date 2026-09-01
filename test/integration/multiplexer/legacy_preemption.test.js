@@ -66,9 +66,17 @@ describe("multiplexer integration legacy preemption", function () {
     );
 
     await connector.connectDevices(-1, null, true);
-    await connector.connectUsbClients("device-1", -1, true, null);
+    const initialWatchCount = countLogEvents(
+      context,
+      "device-start-watch"
+    );
     connector.startWatchAllClients(false);
-    await waitFor(() => connector.watchAllClientsStarted, 2000);
+    await waitFor(
+      () =>
+        countLogEvents(context, "device-start-watch") > initialWatchCount,
+      2000
+    );
+    await connector.connectUsbClients("device-1", -1, true, null);
     await connector.startWSServer();
     const websocketUrl = `ws://127.0.0.1:${connector.wssPort}/mdevices/page/android`;
     const runtime = await connectRuntimeWebSocket(websocketUrl, {
@@ -107,7 +115,10 @@ describe("multiplexer integration legacy preemption", function () {
     );
     await waitFor(() => connector.devices.size === 0, 3000);
     await waitFor(() => connector.usbClients.size === 0, 3000);
-    await waitFor(() => connector.watchAllClientsStarted === false, 3000);
+    await waitFor(
+      () => countLogEvents(context, "disable-all-clients") > 0,
+      3000
+    );
     await waitFor(
       () => connector.getAllWebsocketAppClients().length === 0,
       3000
@@ -165,11 +176,17 @@ describe("multiplexer integration legacy preemption", function () {
     assert.strictEqual(connector.devices.has("device-2"), false);
     assert.strictEqual(connector.usbClients.has(2), false);
 
+    const reacquireWatchCount = countLogEvents(
+      context,
+      "device-start-watch"
+    );
     connector.startWatchAllClients(false);
     await waitFor(
       () =>
         multiOpenStatuses.includes(MultiOpenStatus.attached) &&
-        connector.watchAllClientsStarted,
+        connector.devices.has("device-2") &&
+        connector.usbClients.has(2) &&
+        countLogEvents(context, "device-start-watch") > reacquireWatchCount,
       3000
     );
     assert.strictEqual(readOwnerPid(context.legacyOwnerPath), daemonInfo.pid);
@@ -218,4 +235,8 @@ function readOwnerPid(filePath) {
   } catch (_error) {
     return undefined;
   }
+}
+
+function countLogEvents(context, event) {
+  return context.readLog().filter((entry) => entry.event === event).length;
 }

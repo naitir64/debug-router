@@ -204,9 +204,19 @@ describe("multiplexer integration reconnect and snapshot", function () {
     connector.on("client-disconnected", (id) => disconnectedClients.push(id));
 
     await connector.connectDevices(-1, null, true);
-    await connector.connectUsbClients("device-1", -1, true, null);
+    const initialWatchCount = context
+      .readLog()
+      .filter((entry) => entry.event === "device-start-watch").length;
     connector.startWatchAllClients(false);
-    await waitFor(() => connector.watchAllClientsStarted, 2000);
+    await waitFor(
+      () =>
+        context
+          .readLog()
+          .filter((entry) => entry.event === "device-start-watch")
+          .length > initialWatchCount,
+      2000
+    );
+    await connector.connectUsbClients("device-1", -1, true, null);
     await connector.startWSServer();
 
     const initialInfo = await waitFor(
@@ -214,7 +224,6 @@ describe("multiplexer integration reconnect and snapshot", function () {
       3000
     );
     assert.strictEqual(connector.desiredWSServerStarted, true);
-    assert.strictEqual(connector.webSocketServerStarted, true);
     assert(connector.wssPort > 0, "websocket port should be assigned");
     assert.deepStrictEqual(connector.wss, {
       wssPath: `ws://${connector.wssHost}/mdevices/page/android`,
@@ -224,7 +233,6 @@ describe("multiplexer integration reconnect and snapshot", function () {
     await waitFor(
       () =>
         connector.wss === null &&
-        connector.webSocketServerStarted === false &&
         connector.devices.size === 0 &&
         connector.usbClients.size === 0,
       3000
@@ -240,8 +248,15 @@ describe("multiplexer integration reconnect and snapshot", function () {
       return (
         nextInfo?.pid !== initialInfo.pid &&
         processExists(nextInfo.pid) &&
-        connector.watchAllClientsStarted &&
-        connector.webSocketServerStarted &&
+        connector.devices.has("device-1") &&
+        connector.usbClients.has(1) &&
+        context
+          .readLog()
+          .some(
+            (entry) =>
+              entry.event === "device-start-watch" &&
+              entry.pid === nextInfo.pid
+          ) &&
         connector.wss?.wssPath ===
           `ws://${connector.wssHost}/mdevices/page/android`
       );
@@ -256,10 +271,10 @@ describe("multiplexer integration reconnect and snapshot", function () {
     }, 3000);
     assert.notStrictEqual(nextInfo.pid, initialInfo.pid);
     assert.strictEqual(connector.desiredWSServerStarted, true);
-    assert.strictEqual(connector.webSocketServerStarted, true);
     assert.deepStrictEqual(connector.wss, {
       wssPath: `ws://${connector.wssHost}/mdevices/page/android`,
     });
-    assert.strictEqual(connector.watchAllClientsStarted, true);
+    assert.strictEqual(connector.devices.has("device-1"), true);
+    assert.strictEqual(connector.usbClients.has(1), true);
   });
 });

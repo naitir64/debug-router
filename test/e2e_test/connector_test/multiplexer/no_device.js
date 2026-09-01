@@ -382,13 +382,18 @@ async function runLegacyPreemptionFlow() {
     connector.on("client-disconnected", (id) => disconnectedClients.push(id));
 
     await connector.connectDevices(-1, null, true);
-    await connector.connectUsbClients("device-1", -1, true, null);
+    const initialWatchCount = countLogEvents(
+      context,
+      "device-start-watch"
+    );
     connector.startWatchAllClients(false);
     await waitFor(
-      () => connector.watchAllClientsStarted,
+      () =>
+        countLogEvents(context, "device-start-watch") > initialWatchCount,
       2000,
       "initial legacy watch all clients"
     );
+    await connector.connectUsbClients("device-1", -1, true, null);
 
     const daemon = await waitFor(
       () => findDaemonProcess(context.paths.daemonProcessName),
@@ -413,7 +418,7 @@ async function runLegacyPreemptionFlow() {
       () =>
         connector.devices.size === 0 &&
         connector.usbClients.size === 0 &&
-        connector.watchAllClientsStarted === false,
+        countLogEvents(context, "disable-all-clients") > 0,
       3000,
       "connector device and runtime mirrors cleared after legacy preemption"
     );
@@ -458,11 +463,17 @@ async function runLegacyPreemptionFlow() {
     assert.strictEqual(connector.devices.has("device-2"), false);
     assert.strictEqual(connector.usbClients.has(2), false);
 
+    const reacquireWatchCount = countLogEvents(
+      context,
+      "device-start-watch"
+    );
     connector.startWatchAllClients(false);
     await waitFor(
       () =>
         multiOpenStatuses.includes(MultiOpenStatus.attached) &&
-        connector.watchAllClientsStarted,
+        connector.devices.has("device-2") &&
+        connector.usbClients.has(2) &&
+        countLogEvents(context, "device-start-watch") > reacquireWatchCount,
       3000,
       "daemon reacquires legacy owner"
     );
@@ -513,13 +524,18 @@ async function runWebSocketMirrorRecoveryFlow() {
     connector.on("client-disconnected", (id) => disconnectedClients.push(id));
 
     await connector.connectDevices(-1, null, true);
-    await connector.connectUsbClients("device-1", -1, true, null);
+    const initialWatchCount = countLogEvents(
+      context,
+      "device-start-watch"
+    );
     connector.startWatchAllClients(false);
     await waitFor(
-      () => connector.watchAllClientsStarted,
+      () =>
+        countLogEvents(context, "device-start-watch") > initialWatchCount,
       2000,
       "initial WatchAllClients"
     );
+    await connector.connectUsbClients("device-1", -1, true, null);
     await connector.startWSServer();
 
     const daemon = await waitFor(
@@ -537,7 +553,6 @@ async function runWebSocketMirrorRecoveryFlow() {
     await waitFor(
       () =>
         connector.wss === null &&
-        connector.webSocketServerStarted === false &&
         connector.devices.size === 0 &&
         connector.usbClients.size === 0,
       3000,
@@ -560,8 +575,15 @@ async function runWebSocketMirrorRecoveryFlow() {
           next?.pid &&
           next.pid !== initialPid &&
           processExists(next.pid) &&
-          connector.watchAllClientsStarted &&
-          connector.webSocketServerStarted &&
+          connector.devices.has("device-1") &&
+          connector.usbClients.has(1) &&
+          context
+            .readLog()
+            .some(
+              (entry) =>
+                entry.event === "device-start-watch" &&
+                entry.pid === next.pid
+            ) &&
           connector.wss?.wssPath ===
             `ws://${connector.wssHost}/mdevices/page/android`
         ) {
@@ -576,7 +598,8 @@ async function runWebSocketMirrorRecoveryFlow() {
     assert.deepStrictEqual(connector.wss, {
       wssPath: `ws://${connector.wssHost}/mdevices/page/android`,
     });
-    assert.strictEqual(connector.watchAllClientsStarted, true);
+    assert.strictEqual(connector.devices.has("device-1"), true);
+    assert.strictEqual(connector.usbClients.has(1), true);
   } finally {
     await context.cleanup();
   }
@@ -788,6 +811,10 @@ function readOwnerPid(filePath) {
   } catch (_error) {
     return undefined;
   }
+}
+
+function countLogEvents(context, event) {
+  return context.readLog().filter((entry) => entry.event === event).length;
 }
 
 function processExists(pid) {

@@ -302,6 +302,7 @@ async function runPublicUsbForwardingCase() {
   const context = createContext("public-usb-forwarding");
   try {
     const connector = context.createConnector();
+    const handledMessages = [];
     await connector.startWSServer();
     const driver = await connectWebSocketClient(
       websocketUrl(connector),
@@ -310,6 +311,16 @@ async function runPublicUsbForwardingCase() {
     );
     context.trackSocket(driver.socket);
     const localMessages = collect(connector, "usb-client-message");
+    connector.regiserUsbClient({
+      info: { id: 7 },
+      clientId() {
+        return 7;
+      },
+      handleMessage(message) {
+        handledMessages.push(message);
+      },
+    });
+    assert.strictEqual(connector.usbClients.has(7), true);
 
     const message = JSON.stringify({
       event: "Customized",
@@ -334,6 +345,7 @@ async function runPublicUsbForwardingCase() {
       2000,
       "local public handleUsbMessage event"
     );
+    assert.deepStrictEqual(handledMessages, [message]);
     await delay(100);
     assert.strictEqual(
       driver.messages.some(

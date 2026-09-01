@@ -549,13 +549,8 @@ async function connectTargetDevice(connector, platform, serial, timeout) {
   return candidates[0];
 }
 
-async function activateClientWatching(connector, platform, timeout) {
+function activateClientWatching(connector, _platform, _timeout) {
   connector.startWatchAllClients(false);
-  await waitFor(
-    () => connector.watchAllClientsStarted,
-    Math.max(timeout, 5000),
-    `${platform} client watching activation`
-  );
 }
 
 async function connectTargetClient(
@@ -871,7 +866,7 @@ async function assertLegacyPreemption(
   await waitFor(
     () =>
       multiOpenStatuses.includes(MultiOpenStatus.attached) &&
-      connector.watchAllClientsStarted,
+      readOwnerPid(context.legacyOwnerPath) === daemonPid,
     // Math.max(args.deviceTimeout, 5000),
     500000,
     `${platform} daemon reacquires legacy owner`

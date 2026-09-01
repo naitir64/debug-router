@@ -404,6 +404,12 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       assert.strictEqual(state.managers[0].option.forceRespawnDaemon, false);
       assert.strictEqual(state.managers[0].option.enableWebSocket, true);
+      assert.strictEqual(
+        state.managers[0].option.daemonEntry,
+        require.resolve(
+          "../../../../debug_router_connector/dist/cjs/src/multiplexer/daemon/entry"
+        )
+      );
       assert.deepStrictEqual(
         {
           manualConnect:
@@ -450,7 +456,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
           params: {
             timeout: -1,
             serial: null,
-            isAutoListenClients: true,
           },
         },
       ]);
@@ -573,7 +578,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
           params: {
             timeout: 12,
             serial: "device-1",
-            isAutoListenClients: false,
           },
         },
       ]);
@@ -610,11 +614,25 @@ describe("DebugRouterConnector multiplexer facade", function () {
       connector.unregisterDevice("missing");
       connector.unregisterDevice("device-1");
 
+      assert.strictEqual(connector.devices.has("device-1"), true);
+      assert.deepStrictEqual(disconnected, []);
+
+      connector.unregisterDevice("device-1", true);
+      await nextTick();
+
       assert.strictEqual(connector.devices.has("device-1"), false);
       assert.deepStrictEqual(
         disconnected.map((device) => device.serial),
         ["device-1"]
       );
+      assert.deepStrictEqual(state.clients[0].calls.slice(-1), [
+        {
+          method: "disconnectDevice",
+          params: {
+            deviceId: "device-1",
+          },
+        },
+      ]);
     } finally {
       restore();
     }
@@ -727,6 +745,37 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
+  it("cleans the local USB mirror after a client disconnects", function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    try {
+      const connector = new DebugRouterConnector({
+        manualConnect: true,
+      });
+      const clientDisconnected = collect(connector, "client-disconnected");
+      const appClientDisconnected = collect(
+        connector,
+        "app-client-disconnected"
+      );
+      connector.applySnapshot({
+        protocolVersion: 1,
+        generatedAt: 1,
+        devices: [createDeviceSnapshot()],
+        clients: [createClientSnapshot({ id: 1 })],
+      });
+      connector.selecteUsbClient(1);
+
+      connector.unregiserUsbClient(1);
+
+      assert.strictEqual(connector.usbClients.has(1), false);
+      assert.strictEqual(connector.selectedClient, undefined);
+      assert.deepStrictEqual(clientDisconnected, [1]);
+      assert.deepStrictEqual(appClientDisconnected, [1]);
+      assert.deepStrictEqual(state.clients[0].calls, []);
+    } finally {
+      restore();
+    }
+  });
+
   it("waits for future devices and clients, and times out when no target appears", async function () {
     const { DebugRouterConnector, restore } = loadConnectorWithFakes();
     try {
@@ -808,7 +857,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
         manualConnect: true,
         enableWebSocket: true,
       });
-      connector.webSocketServerStarted = true;
+      connector.wss = {
+        wssPath: "ws://127.0.0.1:8888/mdevices/page/android",
+      };
       const events = {
         deviceDisconnected: collect(connector, "device-disconnected"),
         clientDisconnected: collect(connector, "client-disconnected"),
@@ -979,7 +1030,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("maps legacy ownership events to multi-open callbacks and clears watch state on unattached", function () {
+  it("maps legacy ownership events to multi-open callbacks and clears the selected client on unattached", function () {
     const { DebugRouterConnector, restore } = loadConnectorWithFakes();
     try {
       const connector = new DebugRouterConnector({
@@ -991,7 +1042,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
           statuses.push(status);
         },
       });
-      connector.watchAllClientsStarted = true;
       connector.selectedClient = {
         clientId() {
           return 1;
@@ -1031,7 +1081,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
         MultiOpenStatus.attached,
         MultiOpenStatus.unattached,
       ]);
-      assert.strictEqual(connector.watchAllClientsStarted, false);
       assert.strictEqual(connector.selectedClient, undefined);
     } finally {
       restore();
@@ -1080,7 +1129,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       assert.deepStrictEqual(
         usbMessages.map((item) => item.id),
-        [1, 404]
+        [1]
       );
       assert.deepStrictEqual(clientEvents, [
         [
@@ -1209,7 +1258,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       await connector.startWSServer();
       assert.strictEqual(connector.desiredWSServerStarted, true);
-      assert.strictEqual(connector.webSocketServerStarted, true);
       assert.deepStrictEqual(connector.wss, {
         wssPath: "ws://127.0.0.1:8801/mdevices/page/android",
       });
@@ -1218,11 +1266,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
         state: "disconnected",
         error: new Error("daemon lost"),
       });
-      assert.strictEqual(connector.webSocketServerStarted, false);
       assert.strictEqual(connector.wss, null);
 
       await delay(120);
-      assert.strictEqual(connector.webSocketServerStarted, true);
       assert.deepStrictEqual(connector.wss, {
         wssPath: "ws://127.0.0.1:8802/mdevices/page/android",
       });
@@ -1316,7 +1362,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
         manualConnect: true,
         enableWebSocket: true,
       });
-      connector.webSocketServerStarted = true;
+      connector.wss = {
+        wssPath: "ws://127.0.0.1:8888/mdevices/page/android",
+      };
       connector.applySnapshot({
         protocolVersion: 1,
         generatedAt: 1,
@@ -1331,11 +1379,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
         websocketAppClients: [createWebSocketSnapshot({ id: 100 })],
         websocketWebClients: [createWebSocketSnapshot({ id: 200 })],
       });
-      connector.wss = {
-        wssPath: "ws://127.0.0.1:8888/mdevices/page/android",
-      };
-      connector.watchAllClientsStarted = true;
-
       const events = [];
       connector.on("client-disconnected", (id) =>
         events.push(["client-disconnected", id])
@@ -1359,8 +1402,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
       });
 
       assert.strictEqual(connector.wss, null);
-      assert.strictEqual(connector.webSocketServerStarted, false);
-      assert.strictEqual(connector.watchAllClientsStarted, false);
       assert.strictEqual(connector.usbClients.size, 0);
       assert.strictEqual(connector.websocketAppClients.size, 0);
       assert.strictEqual(connector.websocketWebClients.size, 0);
@@ -1394,7 +1435,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
       connector.startWatchAllClients(false);
       await nextTick();
       assert.strictEqual(connector.desiredWatchAllClientsStarted, true);
-      assert.strictEqual(connector.watchAllClientsStarted, true);
       assert.deepStrictEqual(state.clients[0].calls.slice(0, 1), [
         {
           method: "startAllDeviceClientWatchers",
@@ -1406,10 +1446,8 @@ describe("DebugRouterConnector multiplexer facade", function () {
         state: "disconnected",
         error: new Error("daemon lost"),
       });
-      assert.strictEqual(connector.watchAllClientsStarted, false);
 
       await delay(120);
-      assert.strictEqual(connector.watchAllClientsStarted, true);
       assert.deepStrictEqual(
         state.clients[0].calls
           .filter((call) => call.method === "startAllDeviceClientWatchers")
@@ -1421,7 +1459,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("stops desired WatchAllClients state and does not restore it after reconnect", async function () {
+  it("force-disables daemon clients and does not restore watchers after reconnect", async function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {
       const connector = new DebugRouterConnector({
@@ -1430,11 +1468,19 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       connector.startWatchAllClients(false);
       await nextTick();
-      connector.stopWatchAllClients();
-      await nextTick();
+      await connector.disableAllClients();
+
+      assert.strictEqual(connector.desiredWatchAllClientsStarted, true);
+      assert.deepStrictEqual(state.clients[0].calls, [
+        {
+          method: "startAllDeviceClientWatchers",
+          params: {},
+        },
+      ]);
+
+      await connector.disableAllClients(true);
 
       assert.strictEqual(connector.desiredWatchAllClientsStarted, false);
-      assert.strictEqual(connector.watchAllClientsStarted, false);
       assert.deepStrictEqual(state.clients[0].calls, [
         {
           method: "startAllDeviceClientWatchers",
@@ -1494,20 +1540,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       await connector.connectDevices(12, "device-1", false);
       assert.strictEqual(connector.desiredDeviceDiscoveryStarted, true);
-      assert.strictEqual(
-        connector.desiredDeviceDiscoveryAutoListenClients,
-        false
-      );
-      await connector.connectDevices(13, "device-2", true);
-      assert.strictEqual(
-        connector.desiredDeviceDiscoveryAutoListenClients,
-        true
-      );
-      await connector.connectDevices(14, "device-3", false);
-      assert.strictEqual(
-        connector.desiredDeviceDiscoveryAutoListenClients,
-        true
-      );
       connector.startWatchAllClients(false);
       await nextTick();
       await connector.startWSServer();
@@ -1526,7 +1558,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
           params: {
             timeout: -1,
             serial: null,
-            isAutoListenClients: true,
           },
         },
         {
@@ -1616,7 +1647,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
         manualConnect: true,
         enableWebSocket: true,
       });
-      connector.webSocketServerStarted = true;
+      connector.wss = {
+        wssPath: "ws://127.0.0.1:8888/mdevices/page/android",
+      };
 
       connector.applySnapshot({
         protocolVersion: 1,
@@ -1655,7 +1688,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
         manualConnect: true,
         enableWebSocket: true,
       });
-      connector.webSocketServerStarted = true;
+      connector.wss = {
+        wssPath: "ws://127.0.0.1:8888/mdevices/page/android",
+      };
       const events = [];
       connector.on("websocket-app-client-connected", (client) =>
         events.push(["websocket-app-client-connected", client])
@@ -1712,7 +1747,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
         manualConnect: true,
         enableWebSocket: true,
       });
-      connector.webSocketServerStarted = true;
+      connector.wss = {
+        wssPath: "ws://127.0.0.1:8888/mdevices/page/android",
+      };
       const eventNames = [];
       for (const event of [
         "device-connected",
@@ -1886,7 +1923,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         enableWebSocket: true,
       });
       await connector.startWSServer();
-      assert.strictEqual(connector.webSocketServerStarted, true);
+      assert.notStrictEqual(connector.wss, null);
 
       await connector.close();
       await connector.close();
@@ -1905,7 +1942,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(state.unsubscribeCalls, 1);
       assert.strictEqual(state.unsubscribeConnectionCalls, 1);
       assert.strictEqual(state.forceStopCalls, 0);
-      assert.strictEqual(connector.webSocketServerStarted, false);
       assert.strictEqual(connector.wss, null);
       assert.strictEqual(connector.devices.size, 0);
     } finally {
