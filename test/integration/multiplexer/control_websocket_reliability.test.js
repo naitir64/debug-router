@@ -65,7 +65,9 @@ describe("multiplexer integration control net reliability", function () {
     await waitFor(
       () =>
         connectors[0].devices.has("device-1") &&
-        connectors.every((connector) => connector.daemonClient.ready),
+        connectors.every(
+          (connector) => connector.daemonClient.status === "connected"
+        ),
       4000
     );
 
@@ -215,8 +217,10 @@ describe("multiplexer integration control net reliability", function () {
       ).catch((error) => {
         error.message += `; target=${targetIndex}, states=${JSON.stringify(
           observations.map(({ states }) => states.map(({ state }) => state))
-        )}, ready=${JSON.stringify(
-          connectors.map((connector) => connector.daemonClient.ready)
+        )}, connected=${JSON.stringify(
+          connectors.map(
+            (connector) => connector.daemonClient.status === "connected"
+          )
         )}, controlTrace=${JSON.stringify(
           readControlTrace(tracePath, traceOffset)
         )}`;
@@ -401,7 +405,7 @@ describe("multiplexer integration control net reliability", function () {
         ) &&
         connectors.every(
           (connector) =>
-            connector.daemonClient.ready &&
+            connector.daemonClient.status === "connected" &&
             connector.devices.has("device-1") &&
             connector.usbClients.has(1)
         ),
@@ -721,11 +725,11 @@ describe("multiplexer integration control net reliability", function () {
       }
     }
 
-    const expectedConnectionStateCount =
+    const expectedConnectionEventCount =
       1 + STRESS_CLOSES_PER_CONNECTOR_PER_DIRECTION * 2 * 2;
     assert(
       observations.every(
-        ({ states }) => states.length === expectedConnectionStateCount
+        ({ states }) => states.length === expectedConnectionEventCount
       ),
       "every requested close should produce exactly one disconnect/reconnect callback pair"
     );
@@ -775,7 +779,7 @@ describe("multiplexer integration control net reliability", function () {
         rpcTimeout: 3000,
       })
     );
-    const observations = connectors.map(observeConnectionState);
+    const observations = connectors.map(observeConnectionEvents);
 
     // Sequential startup keeps control IDs and round-robin failure order
     // deterministic while still sharing one real child-process Daemon.
@@ -818,18 +822,18 @@ describe("multiplexer integration control net reliability", function () {
   }
 });
 
-function observeConnectionState(connector) {
+function observeConnectionEvents(connector) {
   const states = [];
   // Keep the production listener single-owner. This white-box test wraps the
   // emission point only to record callback ordering and latency.
-  const emitConnectionState = connector.daemonClient.emitConnectionState.bind(
+  const emitConnectionEvent = connector.daemonClient.emitConnectionEvent.bind(
     connector.daemonClient
   );
-  connector.daemonClient.emitConnectionState = (state) => {
-    emitConnectionState(state);
+  connector.daemonClient.emitConnectionEvent = (event) => {
+    emitConnectionEvent(event);
     states.push({
-      state: state.state,
-      error: state.state === "disconnected" ? state.error.message : undefined,
+      state: event.state,
+      error: event.state === "disconnected" ? event.error.message : undefined,
       at: Date.now(),
       monotonicAtNs: monotonicNowNs(),
     });

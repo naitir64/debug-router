@@ -35,7 +35,7 @@ export class MultiplexerControlConnection {
   ) => Promise<void>;
   private readonly onClose: (controlId: number) => void;
   private readonly createDebugInfo?: () => MultiplexerDebugInfo | undefined;
-  private closedValue = false;
+  private closed = false;
   private unsubscribeMessage: (() => void) | undefined;
   private unsubscribeClose: (() => void) | undefined;
 
@@ -49,10 +49,6 @@ export class MultiplexerControlConnection {
       this.handleTransportMessage,
     );
     this.unsubscribeClose = this.transport.onClose(this.handleClose);
-  }
-
-  get closed(): boolean {
-    return this.closedValue;
   }
 
   send(message: ControlEvent | ControlRpcResponse): void {
@@ -84,17 +80,17 @@ export class MultiplexerControlConnection {
   }
 
   close(): Promise<void> {
-    if (!this.closedValue) {
+    if (!this.closed) {
       this.handleClose();
     }
     return this.transport.end();
   }
 
   handleClose = (): void => {
-    if (this.closedValue) {
+    if (this.closed) {
       return;
     }
-    this.closedValue = true;
+    this.closed = true;
     this.unsubscribeMessage?.();
     this.unsubscribeClose?.();
     this.unsubscribeMessage = undefined;
@@ -117,18 +113,6 @@ export class MultiplexerControlConnection {
       });
       return;
     }
-    this.onMessage(this.controlId, value).catch((error) => {
-      this.sendError(value.id, createDispatchError(error));
-    });
-  };
-}
-
-function createDispatchError(error: unknown): ControlRpcError {
-  return {
-    code: "control-message-dispatch-failed",
-    message:
-      error instanceof Error
-        ? error.message
-        : "Failed to dispatch multiplexer control message",
+    void this.onMessage(this.controlId, value);
   };
 }

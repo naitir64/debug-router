@@ -9,6 +9,8 @@ import { defaultLogger } from "../../utils/logger";
 
 const LATEST_DRIVER_PROCESS_FILE = "LatestDriverProcess";
 const DEFAULT_LEGACY_OWNERSHIP_MONITOR_INTERVAL = 500;
+const LEGACY_LOCK_RELEASE_CHECK_INTERVAL_MS = 10;
+const LEGACY_LOCK_RELEASE_MAX_CHECKS = 5;
 
 export type LegacyOwnershipStatus = "attached" | "unattached" | "unInit";
 
@@ -57,7 +59,7 @@ export class LegacyOwnershipGuard {
     this.ownerFilePath = path.join(this.driverDir, LATEST_DRIVER_PROCESS_FILE);
   }
 
-  start(): void {
+  async start(): Promise<void> {
     if (process.env.DriverCloseMultiOpen === "true") {
       defaultLogger.warn(
         "Legacy ownership guard disabled by DriverCloseMultiOpen",
@@ -70,7 +72,11 @@ export class LegacyOwnershipGuard {
     }
 
     this.stopped = false;
-    this.prepareDriverDataDir();
+    this.ensureDriverDataDir();
+    await this.waitForLegacyLockRelease();
+    if (this.stopped) {
+      return;
+    }
     this.claim("daemon-started");
     this.monitorTimer = setInterval(() => {
       this.monitor();
@@ -87,12 +93,12 @@ export class LegacyOwnershipGuard {
     this.monitorTimer = undefined;
   }
 
-  reacquire(): boolean {
+  async reacquire(): Promise<boolean> {
     if (process.env.DriverCloseMultiOpen === "true") {
       return true;
     }
 
-    this.prepareDriverDataDir();
+    await this.waitForLegacyLockRelease();
     return this.claim("reacquire-requested");
   }
 
@@ -139,13 +145,24 @@ export class LegacyOwnershipGuard {
     });
   }
 
-  private prepareDriverDataDir(): void {
+  private ensureDriverDataDir(): void {
     try {
       fs.mkdirSync(this.driverDir, { recursive: true });
-      fs.rmSync(this.lockDir, { recursive: true, force: true });
     } catch (error: any) {
       defaultLogger.warn(
         `Failed to prepare legacy driver data dir: ${error?.message}`,
+      );
+    }
+  }
+
+  private async waitForLegacyLockRelease(): Promise<void> {
+    for (let check = 0; check < LEGACY_LOCK_RELEASE_MAX_CHECKS; check++) {
+      if (!fs.existsSync(this.lockDir)) {
+        return;
+      }
+
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, LEGACY_LOCK_RELEASE_CHECK_INTERVAL_MS),
       );
     }
   }

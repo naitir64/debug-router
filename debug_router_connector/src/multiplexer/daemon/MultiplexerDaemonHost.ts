@@ -56,8 +56,7 @@ export type PendingTargetSeed = {
 export type RoutedMessage = {
   target: PendingRoute;
   clientId: number;
-  message: string;
-  externalMessage: string;
+  parsedValue: any;
 };
 
 type CustomizedPayload = {
@@ -129,7 +128,7 @@ export class MultiplexerDaemonHost {
       now: this.now,
     });
     this.memoizedQueryTable = new MemoizedQueryTable({
-      ttlMs: option.memoizedNotificationTtlMs,
+      validityPeriodMs: option.memoizedNotificationTtlMs,
       now: this.now,
     });
 
@@ -149,6 +148,7 @@ export class MultiplexerDaemonHost {
     });
   }
 
+  // Starts the control plane; physical watchers and WebSocket serving remain demand-driven.
   async start(): Promise<void> {
     if (this.started) {
       return;
@@ -166,6 +166,7 @@ export class MultiplexerDaemonHost {
       now: this.now,
     });
 
+    // Publish the instance before awaiting start so stop() can roll back a partial startup.
     this.controlServer = controlServer;
 
     try {
@@ -178,7 +179,7 @@ export class MultiplexerDaemonHost {
         protocolVersion: this.protocolVersion,
         ...(debugInfo ? { debugInfo } : {}),
       });
-      this.legacyOwnershipGuard.start();
+      await this.legacyOwnershipGuard.start();
       this.scheduleIdleTimeoutIfNeeded();
     } catch (error) {
       await this.stop();
@@ -199,6 +200,7 @@ export class MultiplexerDaemonHost {
     const stopErrors: unknown[] = [];
     const wasStarted = this.started;
     const daemonStopReason = this.daemonStopReason;
+    // Detach lifecycle state first because closing transports may emit callbacks synchronously.
     this.started = false;
     this.shutdownRequested = false;
     this.clearIdleTimeout();
@@ -284,8 +286,7 @@ export class MultiplexerDaemonHost {
       void this.ensureClientWatcher(device.serial);
     }
 
-    this.webSocketController?.sendDeviceList();
-    this.publishSnapshot();
+    this.sendSnapshot();
   };
 
   private readonly handleDeviceDisconnected = (device: BaseDevice): void => {
@@ -293,8 +294,7 @@ export class MultiplexerDaemonHost {
 
     this.clearClientWatcherStartState(device.serial);
 
-    this.webSocketController?.sendDeviceList();
-    this.publishSnapshot();
+    this.sendSnapshot();
   };
 
   private readonly handleClientConnected = (client: UsbClient): void => {
@@ -304,7 +304,7 @@ export class MultiplexerDaemonHost {
 
     this.connectionTraceRecorder?.recordAppClientConnected(client);
     this.webSocketController?.sendClientList();
-    this.publishSnapshot();
+    this.sendSnapshot();
   };
 
   private readonly handleClientDisconnected = (id: number): void => {
@@ -320,7 +320,7 @@ export class MultiplexerDaemonHost {
     );
 
     this.webSocketController?.sendClientList();
-    this.publishSnapshot();
+    this.sendSnapshot();
   };
 
   private readonly handleLegacyOwnershipChanged = (
@@ -349,6 +349,8 @@ export class MultiplexerDaemonHost {
   };
 
   private handleLegacyOwnershipLost(): void {
+    // Preserve discovered devices for reacquisition, but invalidate runtime
+    // state owned by the lost legacy connection.
     this.clearAllClientWatcherStartState();
     this.memoizedQueryTable.clear();
     this.rejectRoutes(
@@ -358,8 +360,7 @@ export class MultiplexerDaemonHost {
     this.physicalConnector.disableAllClients();
     this.physicalConnector.usbClients.clear();
     this.getWebSocketAppClients()?.forEach((client) => client.close());
-    this.publishSnapshot();
-    this.webSocketController?.sendDeviceList();
+    this.sendSnapshot();
     this.webSocketController?.sendClientList();
   }
 
@@ -369,11 +370,7 @@ export class MultiplexerDaemonHost {
       activeControlCount: this.activeControlIds.size,
     });
     this.clearIdleTimeout();
-    this.sendToControl(controlId, {
-      kind: "event",
-      event: "snapshot",
-      data: this.createSnapshot(),
-    });
+    this.sendSnapshot([controlId]);
   }
 
   handleControlDisconnected(controlId: number): void {
@@ -382,6 +379,7 @@ export class MultiplexerDaemonHost {
       activeControlCount: this.activeControlIds.size,
     });
     this.webSocketRequesterControlIds.delete(controlId);
+    // Routes belong to their requester; shared runtime caches survive a control disconnect.
     this.rejectRoutes(
       this.pendingRoutes.clearByControlId(controlId),
       new Error(`Multiplexer control ${controlId} disconnected`),
@@ -390,11 +388,12 @@ export class MultiplexerDaemonHost {
   }
 
   handleWebSocketClientConnected(clientId: number, type: string): void {
+    // Runtime Apps are resources; only Driver frontends are consumers that keep the daemon alive.
     if (type === "Driver") {
       this.activeWebSocketDriverIds.add(clientId);
       this.clearIdleTimeout();
     }
-    this.sendSnapshotToWebSocketRequesters();
+    this.sendSnapshot(this.webSocketRequesterControlIds);
   }
 
   handleWebSocketClientDisconnected(clientId: number, type: string): void {
@@ -409,7 +408,7 @@ export class MultiplexerDaemonHost {
         new Error(`Multiplexer runtime client ${clientId} disconnected`),
       );
     }
-    this.sendSnapshotToWebSocketRequesters();
+    this.sendSnapshot(this.webSocketRequesterControlIds);
   }
 
   emit<Event extends keyof DebugerRouterDriverEvents>(
@@ -594,6 +593,7 @@ export class MultiplexerDaemonHost {
       return;
     }
 
+    // Concurrent facade requests share one watcher startup per physical device.
     const existing = this.clientWatcherStartingByDeviceId.get(deviceId);
     if (existing) return existing;
 
@@ -621,7 +621,7 @@ export class MultiplexerDaemonHost {
   }
 
   private async startWatchAllClients(): Promise<void> {
-    this.legacyOwnershipGuard.reacquire();
+    await this.legacyOwnershipGuard.reacquire();
     await this.ensureAllClientWatchers();
     this.publishClientSnapshot();
   }
@@ -647,7 +647,7 @@ export class MultiplexerDaemonHost {
 
   private publishClientSnapshot(): void {
     this.webSocketController?.sendClientList();
-    this.publishSnapshot();
+    this.sendSnapshot();
   }
 
   private disconnectDevice(params: ControlRpcParams["disconnectDevice"]): void {
@@ -682,6 +682,7 @@ export class MultiplexerDaemonHost {
     });
     this.clearIdleTimeout();
     const shutdownHandler = this.shutdownHandler;
+    // Let the current control RPC send its response before entry tears down the process.
     setImmediate(() => {
       void shutdownHandler();
     });
@@ -696,6 +697,7 @@ export class MultiplexerDaemonHost {
       };
     }
 
+    // Subscribe before awaiting startup so this control cannot miss concurrent WebSocket snapshots.
     this.webSocketRequesterControlIds.add(controlId);
 
     try {
@@ -708,11 +710,12 @@ export class MultiplexerDaemonHost {
               "The multiplexer daemon WebSocket server information is unavailable",
           };
         }
-        this.sendSnapshotToControl(controlId);
+        this.sendSnapshot([controlId]);
         return info;
       }
 
       if (!this.webSocketServerStarting) {
+        // All concurrent requesters observe the same startup attempt and failure cleanup.
         this.webSocketServerStarting = this.startWebSocketServerInternal()
           .then((info) => {
             this.webSocketServerStarted = true;
@@ -720,13 +723,29 @@ export class MultiplexerDaemonHost {
             this.connectionTraceRecorder?.recordWebsocketServerStarted(info);
             return info;
           })
+          .catch((error) => {
+            const webSocketController = this.webSocketController;
+            this.webSocketController = null;
+            try {
+              webSocketController?.close();
+            } catch (closeError) {
+              defaultLogger.warn(
+                `Failed to close WebSocket controller after start failure: ${
+                  closeError instanceof Error
+                    ? closeError.message
+                    : String(closeError)
+                }`,
+              );
+            }
+            throw error;
+          })
           .finally(() => {
             this.webSocketServerStarting = null;
           });
       }
 
       const info = await this.webSocketServerStarting;
-      this.sendSnapshotToControl(controlId);
+      this.sendSnapshot([controlId]);
       return info;
     } catch (error) {
       this.webSocketRequesterControlIds.delete(controlId);
@@ -805,16 +824,26 @@ export class MultiplexerDaemonHost {
     this.controlServer?.sendToControl(controlId, event);
   }
 
-  publishSnapshot(snapshot: Snapshot = this.createSnapshot()): void {
-    this.broadcast({
+  private sendSnapshot(controlIds?: Iterable<number>): void {
+    // An omitted target broadcasts authoritative state; explicit ids preserve
+    // requester-scoped visibility.
+    const event: ControlEvent = {
       kind: "event",
       event: "snapshot",
-      data: snapshot,
-    });
+      data: this.createSnapshot(),
+    };
+    if (!controlIds) {
+      this.broadcast(event);
+      return;
+    }
+    for (const controlId of controlIds) {
+      this.sendToControl(controlId, event);
+    }
   }
 
   createSnapshot(): Snapshot {
     const generatedAt = this.now();
+    // Ownership loss hides physical and WiFi runtimes while retaining live Driver frontends.
     const physicalDevices = this.legacyOwnershipAttached
       ? Array.from(this.physicalConnector.devices.values())
       : [];
@@ -911,22 +940,6 @@ export class MultiplexerDaemonHost {
     }
   }
 
-  private sendSnapshotToControl(controlId: number): void {
-    this.sendToControl(controlId, {
-      kind: "event",
-      event: "snapshot",
-      data: this.createSnapshot(),
-    });
-  }
-
-  private sendSnapshotToWebSocketRequesters(): void {
-    this.sendToWebSocketRequesters({
-      kind: "event",
-      event: "snapshot",
-      data: this.createSnapshot(),
-    });
-  }
-
   private serializeWebSocketClient(
     client: WebSocketClient,
   ): WebSocketClientSnapshot {
@@ -983,6 +996,7 @@ export class MultiplexerDaemonHost {
     });
   }
 
+  // This path may serve from cache or coalesce a query before it sends anything to the runtime.
   private sendMessageToRuntime(
     clientId: number,
     message: string | object,
@@ -1013,14 +1027,24 @@ export class MultiplexerDaemonHost {
 
     const memoizedQuery = this.memoizedQueryTable.query(clientId, data);
     if (memoizedQuery.action === "cached") {
-      this.sendMessageToTargetDriver(target, clientId, memoizedQuery.message);
+      this.sendMessageToTargetDriver(
+        target,
+        clientId,
+        memoizedQuery.message,
+        memoizedQuery.parsedValue,
+      );
       return;
     }
     if (memoizedQuery.action === "pending") {
       return;
     }
 
+    // Register the route before sending so an immediate runtime response can be correlated.
     const route = this.rewriteOutboundMessageData(data, target);
+    // Retry the normalized payload directly; re-entering this method would
+    // coalesce it as already pending.
+    const retryMessage =
+      memoizedQuery.action === "forward" ? cloneJsonValue(data) : undefined;
     try {
       if (websocketClient) {
         websocketClient.sendMessage(JSON.stringify(data));
@@ -1035,9 +1059,35 @@ export class MultiplexerDaemonHost {
         );
       }
       if (route) {
-        this.pendingRoutes.delete(route.globalMessageId);
+        this.pendingRoutes.take(route.globalMessageId);
       }
       throw error;
+    }
+
+    if (memoizedQuery.action === "forward") {
+      this.memoizedQueryTable.setRetryTimer(
+        clientId,
+        memoizedQuery.requestType,
+        () => {
+          try {
+            if (websocketClient) {
+              websocketClient.sendMessage(JSON.stringify(retryMessage));
+              return true;
+            }
+            if (usbClient) {
+              usbClient.sendMessage(retryMessage);
+              return true;
+            }
+          } catch (error) {
+            defaultLogger.warn(
+              `Stop retrying memoized query for runtime ${clientId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+          return false;
+        },
+      );
     }
   }
 
@@ -1045,10 +1095,11 @@ export class MultiplexerDaemonHost {
     target: PendingTargetSeed,
     clientId: number,
     message: string,
+    parsedValue: unknown,
   ): void {
     if (target.kind === "control") {
       if (target.resolve) {
-        target.resolve(parseRawResponse(message, clientId));
+        target.resolve(normalizeRawResponse(parsedValue, clientId));
         return;
       }
       this.sendToControl(target.requesterId, {
@@ -1066,12 +1117,6 @@ export class MultiplexerDaemonHost {
     }
 
     this.sendMessageToWebClient(target.requesterId, message);
-  }
-
-  rewriteOutboundMessage(message: string, target: PendingTargetSeed): string {
-    const data = parseJsonMessage(message);
-    this.rewriteOutboundMessageData(data, target);
-    return JSON.stringify(data);
   }
 
   private rewriteOutboundMessageData(
@@ -1095,21 +1140,28 @@ export class MultiplexerDaemonHost {
     return route;
   }
 
+  // Separates point-to-point responses from notifications shared with every requester.
   private handleRuntimeMessage(
     clientId: number,
     message: string,
     source: "usb-runtime" | "websocket-runtime",
   ): void {
-    const routed = this.restoreInboundMessage(message, clientId);
+    const parsedValue = parseJsonMessageOrNull(message);
+    const customized = getCustomizedPayload(parsedValue);
+    const routed = this.restoreInboundMessage(
+      parsedValue,
+      customized,
+      clientId,
+    );
     if (routed) {
       if (routed.target.kind === "control") {
         if (routed.target.resolve) {
           routed.target.resolve(
-            parseRawResponse(routed.externalMessage, routed.clientId),
+            normalizeRawResponse(routed.parsedValue, routed.clientId),
           );
         } else {
           // Connector facade events are a legacy compatibility surface.
-          // externalMessage restores the caller's original request id without
+          // parsedValue restores the caller's original request id without
           // exposing the sender/client_id rewrite used for Web routing.
           this.sendToControl(routed.target.requesterId, {
             kind: "event",
@@ -1117,17 +1169,22 @@ export class MultiplexerDaemonHost {
             data: {
               source,
               id: routed.clientId,
-              message: routed.externalMessage,
+              message: JSON.stringify(routed.parsedValue),
             },
           });
         }
       } else {
-        this.sendMessageToWebClient(routed.target.requesterId, routed.message);
+        rewriteRuntimeClientIdData(routed.parsedValue, routed.clientId);
+        this.sendMessageToWebClient(
+          routed.target.requesterId,
+          JSON.stringify(routed.parsedValue),
+        );
       }
       return;
     }
 
-    if (hasResponseId(message)) {
+    // An ID-bearing response without a live route cannot be safely attributed or broadcast.
+    if (getValidMessageId(customized?.message) !== null) {
       defaultLogger.debug(
         `Drop multiplexer response with unknown message id from client ${clientId}`,
       );
@@ -1138,8 +1195,16 @@ export class MultiplexerDaemonHost {
     // runtime identity for routing. Connector facades instead receive the
     // runtime's original string below, preserving the legacy event payload
     // byte-for-byte for idless notifications.
-    const broadcastMessage = rewriteRuntimeClientId(message, clientId);
-    this.memoizedQueryTable.recordNotification(clientId, broadcastMessage);
+    let broadcastMessage = message;
+    if (parsedValue) {
+      rewriteRuntimeClientIdData(parsedValue, clientId);
+      broadcastMessage = JSON.stringify(parsedValue);
+    }
+    this.memoizedQueryTable.recordNotification(
+      clientId,
+      broadcastMessage,
+      parsedValue,
+    );
     if (this.option.enableWebSocket) {
       this.sendMessageToWeb(broadcastMessage);
     }
@@ -1154,22 +1219,23 @@ export class MultiplexerDaemonHost {
     });
   }
 
+  // Claims a matching one-shot route and restores the requester's original message id.
   restoreInboundMessage(
-    message: string,
+    parsedValue: any | null,
+    customized: CustomizedPayload | null,
     sourceClientId: number,
   ): RoutedMessage | null {
-    const data = parseJsonMessageOrNull(message);
-    if (!data) {
+    if (!parsedValue) {
       return null;
     }
 
-    const customized = getCustomizedPayload(data);
     const globalMessageId = getValidMessageId(customized?.message);
     if (globalMessageId === null) {
       return null;
     }
 
     const pendingTarget = this.pendingRoutes.get(globalMessageId);
+    // Validate the runtime origin before consuming a globally unique route.
     if (pendingTarget && pendingTarget.clientId !== sourceClientId) {
       defaultLogger.warn(
         `Drop multiplexer response with global message id ${globalMessageId} ` +
@@ -1187,14 +1253,11 @@ export class MultiplexerDaemonHost {
       customized.message.id = target.originalId;
       writeCustomizedMessage(customized);
     }
-    const externalMessage = JSON.stringify(data);
-    rewriteRuntimeClientIdData(data, target.clientId);
 
     return {
       target,
       clientId: target.clientId,
-      message: JSON.stringify(data),
-      externalMessage,
+      parsedValue,
     };
   }
 
@@ -1272,12 +1335,6 @@ export class MultiplexerDaemonHost {
 
   private clearRuntimeState(): void {
     this.clearAllClientWatcherStartState();
-    this.webSocketServerStarted = false;
-    this.webSocketServerStarting = null;
-    this.activeControlIds.clear();
-    this.webSocketRequesterControlIds.clear();
-    this.activeWebSocketDriverIds.clear();
-    this.clearIdleTimeout();
     this.memoizedQueryTable.clear();
     this.rejectRoutes(
       this.pendingRoutes.clear(),
@@ -1299,6 +1356,7 @@ export class MultiplexerDaemonHost {
     }
   }
 
+  // Runtime Apps do not own daemon lifetime; only controls and Driver frontends do.
   private scheduleIdleTimeoutIfNeeded(): void {
     if (!this.started || !this.idleTimeoutHandler) {
       return;
@@ -1312,6 +1370,7 @@ export class MultiplexerDaemonHost {
     this.clearIdleTimeout();
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
+      // A new consumer may have connected while this timer was waiting.
       if (this.isInUse()) {
         return;
       }
@@ -1404,45 +1463,32 @@ function getValidMessageId(message: any | null | undefined): number | null {
   return Number.isSafeInteger(message?.id) ? message.id : null;
 }
 
-function hasResponseId(message: string): boolean {
-  const data = parseJsonMessageOrNull(message);
-  if (!data) {
-    return false;
-  }
-
-  const customized = getCustomizedPayload(data);
-  return getValidMessageId(customized?.message) !== null;
-}
-
-function parseRawResponse(
-  message: string,
+function normalizeRawResponse(
+  data: any,
   clientId: number,
 ): ResponseMessageType {
-  const data = parseJsonMessage(message);
-  if (
-    data?.data?.data &&
-    Object.prototype.hasOwnProperty.call(data.data.data, "client_id")
-  ) {
-    data.data.data.client_id = clientId;
-  }
-  if (
-    data?.data?.data &&
-    Object.prototype.hasOwnProperty.call(data.data.data, "message") &&
-    typeof data.data.data.message !== "string"
-  ) {
-    data.data.data.message = JSON.stringify(data.data.data.message);
-  }
-  return data as ResponseMessageType;
-}
-
-function rewriteRuntimeClientId(message: string, clientId: number): string {
-  const data = parseJsonMessageOrNull(message);
-  if (!data) {
-    return message;
+  if (!data?.data?.data) {
+    return data as ResponseMessageType;
   }
 
-  rewriteRuntimeClientIdData(data, clientId);
-  return JSON.stringify(data);
+  const responsePayload = { ...data.data.data };
+  if (Object.prototype.hasOwnProperty.call(responsePayload, "client_id")) {
+    responsePayload.client_id = clientId;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(responsePayload, "message") &&
+    typeof responsePayload.message !== "string"
+  ) {
+    responsePayload.message = JSON.stringify(responsePayload.message);
+  }
+
+  return {
+    ...data,
+    data: {
+      ...data.data,
+      data: responsePayload,
+    },
+  } as ResponseMessageType;
 }
 
 function rewriteRuntimeClientIdData(data: any, clientId: number): void {

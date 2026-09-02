@@ -129,6 +129,7 @@ function createManager(tempDir, values, overrides = {}) {
     readyPollInterval: overrides.readyPollInterval ?? 10,
     replacementTimeout: overrides.replacementTimeout ?? 20,
     localProtocolVersion: 1,
+    enableDebugMode: overrides.enableDebugMode,
     debugInfo: overrides.debugInfo,
     legacyDriverDir: overrides.legacyDriverDir,
     enableWebSocket: overrides.enableWebSocket,
@@ -185,6 +186,26 @@ describe("MultiplexerDaemonManager", function () {
     await manager.stopDaemonForDebugging();
     assert.deepStrictEqual(spawnCalls, []);
     assert.strictEqual(fs.existsSync(spawnLockPath), false);
+  });
+
+  it("stops and respawns the daemon on every ensure in debug mode", async function () {
+    const stopReasons = [];
+    const { manager, discovery, spawnCalls } = createManager(
+      tempDir,
+      [usable(), usable(), usable(), usable()],
+      { enableDebugMode: true }
+    );
+    manager.tryGracefullyStopDaemon = async (reason) => {
+      stopReasons.push(reason);
+    };
+
+    await manager.ensureDaemon();
+    await manager.ensureDaemon();
+
+    assert.deepStrictEqual(stopReasons, ["force-stop", "force-stop"]);
+    assert.strictEqual(spawnCalls.length, 2);
+    assert.strictEqual(discovery.calls, 4);
+    assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
   });
 
   it("[v1 compatibility gate] spawns once with the required daemon contract", async function () {
@@ -245,7 +266,7 @@ describe("MultiplexerDaemonManager", function () {
       physicalConnectorOption,
     });
 
-    await manager.spawnDaemon();
+    manager.spawnDaemon();
 
     assert.strictEqual(spawnCalls.length, 1);
     const args = spawnCalls[0].args;
@@ -483,6 +504,29 @@ describe("MultiplexerDaemonManager", function () {
     assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
   });
 
+  it("force-stops every daemon without RPC when multiple daemon pids are found", async function () {
+    const rpcCalls = [];
+    const stoppedPids = [];
+    const { manager, controlEndpoint } = createManager(tempDir, [usable()], {
+      isProcessAlive: () => true,
+    });
+    manager.findDaemonProcessIds = async () => [101, 202];
+    manager.forceStopProcess = async (pid) => stoppedPids.push(pid);
+    manager.setDaemonClient({
+      async call(method, params, ensureDaemon) {
+        rpcCalls.push([method, params, ensureDaemon]);
+        return {};
+      },
+    });
+    fs.writeFileSync(controlEndpoint, "stale");
+
+    await manager.tryGracefullyStopDaemon("force-stop");
+
+    assert.deepStrictEqual(rpcCalls, []);
+    assert.deepStrictEqual(stoppedPids, [101, 202]);
+    assert.strictEqual(fs.existsSync(controlEndpoint), false);
+  });
+
   it("finds and stops a Unix daemon by its argv0 marker", async function () {
     if (process.platform === "win32") this.skip();
     this.timeout(5000);
@@ -570,7 +614,7 @@ describe("MultiplexerDaemonManager", function () {
     }
   });
 
-  it("reports and returns when graceful shutdown cannot find a daemon pid", async function () {
+  it("reports and removes stale artifacts when graceful shutdown cannot find a daemon pid", async function () {
     const errors = [];
     const controlEndpoint = path.join(tempDir, "control.sock");
     const { manager } = createManager(tempDir, [usable()]);
@@ -595,6 +639,6 @@ describe("MultiplexerDaemonManager", function () {
     ]);
     assert.strictEqual(errors.length, 1);
     assert.ok(errors[0].includes(manager.daemonProcessName));
-    assert.strictEqual(fs.existsSync(controlEndpoint), true);
+    assert.strictEqual(fs.existsSync(controlEndpoint), false);
   });
 });

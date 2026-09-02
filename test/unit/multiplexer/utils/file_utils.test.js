@@ -46,43 +46,22 @@ describe("multiplexer FileLock", function () {
     const second = new FileLock(lockPath);
 
     assert.strictEqual(first.acquire(), true);
+    const ownerBeforeRepeatedAcquire = first.readOwner();
     assert.strictEqual(first.acquire(), true);
-    assert.strictEqual(first.isLocked(), true);
     const firstOwner = first.readOwner();
+    assert.deepStrictEqual(firstOwner, ownerBeforeRepeatedAcquire);
     assert.strictEqual(firstOwner.pid, process.pid);
     assert.strictEqual(typeof firstOwner.token, "string");
     assert.notStrictEqual(firstOwner.token, "");
+    assert.strictEqual(
+      fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"),
+      JSON.stringify(firstOwner)
+    );
     assert.strictEqual(second.acquire(), false);
 
     first.release();
-    assert.strictEqual(first.isLocked(), false);
     assert.strictEqual(second.acquire(), true);
     second.release();
-  });
-
-  it("uses the injected token factory when acquiring a lock", function () {
-    const lockPath = path.join(tempDir, "injected-token.lock");
-    const calls = [];
-    const lock = new FileLock(lockPath, ({ pid, createdAt }) => {
-      calls.push({ pid, createdAt });
-      return `test-token-${pid}-${createdAt}`;
-    });
-
-    assert.strictEqual(lock.acquire(), true);
-
-    const owner = lock.readOwner();
-    assert.deepStrictEqual(calls, [
-      {
-        pid: owner.pid,
-        createdAt: owner.createdAt,
-      },
-    ]);
-    assert.strictEqual(
-      owner.token,
-      `test-token-${owner.pid}-${owner.createdAt}`
-    );
-
-    lock.release();
   });
 
   it("does not let release remove a lock not owned by this instance", function () {
@@ -113,12 +92,74 @@ describe("multiplexer FileLock", function () {
 
     lock.release();
 
-    assert.strictEqual(lock.isLocked(), false);
     assert.strictEqual(fs.existsSync(lockPath), true);
     assert.strictEqual(
       new FileLock(lockPath).readOwner().token,
       "another-owner"
     );
+
+    fs.rmSync(lockPath, { recursive: true, force: true });
+    assert.strictEqual(lock.acquire(), true);
+    assert.notStrictEqual(lock.readOwner(), null);
+    lock.release();
+  });
+
+  it("does not trust local ownership after the lock is replaced", function () {
+    const lockPath = path.join(tempDir, "replaced-before-acquire.lock");
+    const lock = new FileLock(lockPath);
+    const replacementOwner = {
+      pid: process.pid,
+      createdAt: Date.now(),
+      token: "replacement-owner",
+    };
+
+    assert.strictEqual(lock.acquire(), true);
+    fs.rmSync(lockPath, { recursive: true, force: true });
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(
+      path.join(lockPath, "owner.json"),
+      JSON.stringify(replacementOwner)
+    );
+
+    assert.strictEqual(lock.acquire(), false);
+    assert.deepStrictEqual(
+      new FileLock(lockPath).readOwner(),
+      replacementOwner
+    );
+    lock.release();
+    assert.deepStrictEqual(
+      new FileLock(lockPath).readOwner(),
+      replacementOwner
+    );
+  });
+
+  it("throws when best-effort release fails", function () {
+    const lockPath = path.join(tempDir, "release-failed.lock");
+    const lock = new FileLock(lockPath);
+    const originalRmSync = fs.rmSync;
+    let removeAttempts = 0;
+
+    assert.strictEqual(lock.acquire(), true);
+    fs.rmSync = (targetPath, option) => {
+      if (targetPath === lockPath) {
+        removeAttempts++;
+        throw new Error("persistent remove failure");
+      }
+      return originalRmSync(targetPath, option);
+    };
+    try {
+      assert.throws(
+        () => lock.release(),
+        new RegExp(`Failed to release file lock: ${lockPath}`)
+      );
+    } finally {
+      fs.rmSync = originalRmSync;
+    }
+
+    assert.strictEqual(removeAttempts, 1);
+    assert.strictEqual(fs.existsSync(lockPath), true);
+    lock.release();
+    assert.strictEqual(fs.existsSync(lockPath), false);
   });
 
   it("keeps different lock paths independent", function () {
@@ -159,33 +200,19 @@ describe("multiplexer FileLock", function () {
       })
     );
     assert.strictEqual(lock.readOwner(), null);
-  });
 
-  it("reports whether the lock owner process is alive", function () {
-    const liveLockPath = path.join(tempDir, "live-owner.lock");
-    const deadLockPath = path.join(tempDir, "dead-owner.lock");
-    const invalidLockPath = path.join(tempDir, "invalid-owner.lock");
-
-    const liveLock = new FileLock(liveLockPath);
-    assert.strictEqual(liveLock.acquire(), true);
-    assert.strictEqual(liveLock.isLockOwnerAlive(), true);
-
-    fs.mkdirSync(deadLockPath);
-    writeLockOwner(deadLockPath, {
-      pid: 987654321,
-      createdAt: Date.now(),
-    });
-    assert.strictEqual(new FileLock(deadLockPath).isLockOwnerAlive(), false);
-
-    fs.mkdirSync(invalidLockPath);
-    fs.writeFileSync(path.join(invalidLockPath, "owner.json"), "{bad");
-    assert.strictEqual(new FileLock(invalidLockPath).isLockOwnerAlive(), false);
-    assert.strictEqual(
-      new FileLock(path.join(tempDir, "missing.lock")).isLockOwnerAlive(),
-      false
-    );
-
-    liveLock.release();
+    for (const invalidOwner of [
+      { pid: 1.5, createdAt: Date.now(), token: "token" },
+      { pid: -1, createdAt: Date.now(), token: "token" },
+      { pid: 1, createdAt: -1, token: "token" },
+      { pid: 1, createdAt: Date.now(), token: "" },
+    ]) {
+      fs.writeFileSync(
+        path.join(lockPath, "owner.json"),
+        JSON.stringify(invalidOwner)
+      );
+      assert.strictEqual(lock.readOwner(), null);
+    }
   });
 
   it("reports non-existent locks as not stale", function () {
@@ -254,26 +281,31 @@ describe("multiplexer FileLock", function () {
     assert.deepStrictEqual(new FileLock(lockPath).readOwner(), freshOwner);
   });
 
-  it("uses lock directory mtime when owner metadata is missing", function () {
+  it("treats ownerless and invalid-owner lock directories as stale", function () {
     const now = Date.now();
-    const staleLockPath = path.join(tempDir, "mtime-stale.lock");
-    const freshLockPath = path.join(tempDir, "mtime-fresh.lock");
+    const ownerlessLockPath = path.join(tempDir, "ownerless.lock");
+    const invalidOwnerLockPath = path.join(tempDir, "invalid-owner.lock");
 
-    fs.mkdirSync(staleLockPath);
-    fs.mkdirSync(freshLockPath);
-    fs.utimesSync(staleLockPath, new Date(now - 5000), new Date(now - 5000));
-    fs.utimesSync(freshLockPath, new Date(now), new Date(now));
+    fs.mkdirSync(ownerlessLockPath);
+    fs.mkdirSync(invalidOwnerLockPath);
+    fs.writeFileSync(path.join(invalidOwnerLockPath, "owner.json"), "{bad");
 
     assert.strictEqual(
-      new FileLock(staleLockPath).cleanupStale(1000, now),
+      new FileLock(ownerlessLockPath).cleanupStale(
+        Number.MAX_SAFE_INTEGER,
+        now
+      ),
       true
     );
-    assert.strictEqual(fs.existsSync(staleLockPath), false);
     assert.strictEqual(
-      new FileLock(freshLockPath).cleanupStale(1000, now),
-      false
+      new FileLock(invalidOwnerLockPath).cleanupStale(
+        Number.MAX_SAFE_INTEGER,
+        now
+      ),
+      true
     );
-    assert.strictEqual(fs.existsSync(freshLockPath), true);
+    assert.strictEqual(fs.existsSync(ownerlessLockPath), false);
+    assert.strictEqual(fs.existsSync(invalidOwnerLockPath), false);
   });
 
   it("treats a lock with a dead owner process as stale", function () {
@@ -309,19 +341,13 @@ describe("multiplexer FileLock", function () {
     const replacementOwner = replacement.readOwner();
 
     lock.release();
-    assert.strictEqual(lock.isLocked(), false);
     assert.deepStrictEqual(replacement.readOwner(), replacementOwner);
     assert.strictEqual(fs.existsSync(lockPath), true);
     replacement.release();
-  });
 
-  it("cleans an ownerless lock and treats missing locks as already clean", function () {
-    const lockPath = path.join(tempDir, "ownerless.lock");
-    const lock = new FileLock(lockPath);
-    fs.mkdirSync(lockPath);
-
-    assert.strictEqual(lock.cleanup(), true);
+    assert.strictEqual(lock.acquire(), true);
+    assert.notStrictEqual(lock.readOwner(), null);
+    lock.release();
     assert.strictEqual(fs.existsSync(lockPath), false);
-    assert.strictEqual(lock.cleanup(), true);
   });
 });

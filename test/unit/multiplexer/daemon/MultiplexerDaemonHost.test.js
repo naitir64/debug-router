@@ -33,6 +33,30 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function createTimers() {
+  const timers = [];
+  return {
+    timers,
+    setTimeout(callback, timeoutMs) {
+      const timer = {
+        callback,
+        timeoutMs,
+        cleared: false,
+      };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      timer.cleared = true;
+    },
+    run(timer) {
+      if (!timer.cleared) {
+        timer.callback();
+      }
+    },
+  };
+}
+
 function createDeferred() {
   let resolve;
   let reject;
@@ -1221,7 +1245,7 @@ describe("MultiplexerDaemonHost", function () {
     assert.deepStrictEqual(Array.from(webSocketControllerState.webMap.keys()), [
       30,
     ]);
-    assert.strictEqual(webSocketControllerState.sendDeviceListCalls, 1);
+    assert.strictEqual(webSocketControllerState.sendDeviceListCalls, 0);
     assert.strictEqual(webSocketControllerState.sendClientListCalls, 1);
 
     physical.emit("device-connected", createDevice("late-device"));
@@ -1300,7 +1324,7 @@ describe("MultiplexerDaemonHost", function () {
     );
     assert.deepStrictEqual(physical.startWatchClientCalls, ["device-1"]);
     assert.strictEqual(device.state.startWatchCalls, 1);
-    assert.strictEqual(webSocketController.sendDeviceListCalls, 1);
+    assert.strictEqual(webSocketController.sendDeviceListCalls, 0);
     assert.strictEqual(webSocketController.sendClientListCalls, 2);
     assert.deepStrictEqual(
       host.connectionTraceRecorder.getRecentNodes().map((node) => ({
@@ -1967,7 +1991,7 @@ describe("MultiplexerDaemonHost", function () {
       client.state.sendMessageCalls[1]
     ).id;
     assert.notStrictEqual(globalMessageId, 77);
-    assert.strictEqual(host.pendingRoutes.size, 1);
+    assert.notStrictEqual(host.pendingRoutes.get(globalMessageId), null);
 
     host.handlePhysicalMessage(
       12,
@@ -2004,7 +2028,7 @@ describe("MultiplexerDaemonHost", function () {
     assert.deepStrictEqual(physical.sendRawMessageCalls, []);
     assert.deepStrictEqual(physical.sendMessageCalls, []);
     assert.strictEqual(client.state.sendMessageCalls.length, 2);
-    assert.strictEqual(host.pendingRoutes.size, 0);
+    assert.strictEqual(host.pendingRoutes.get(globalMessageId), null);
     assert.strictEqual(controlServer.targeted.length, 1);
     assert.strictEqual(controlServer.targeted[0].controlId, 1);
     assert.deepStrictEqual(
@@ -2654,8 +2678,17 @@ describe("MultiplexerDaemonHost", function () {
       enableWebSocket: true,
     });
     let calls = 0;
+    const controllers = [];
     host.startWebSocketServerInternal = async () => {
       calls++;
+      const controller = {
+        closeCalls: 0,
+        close() {
+          this.closeCalls++;
+        },
+      };
+      controllers.push(controller);
+      host.webSocketController = controller;
       throw {
         code: "custom-start-failed",
         message: "custom start failed",
@@ -2666,11 +2699,15 @@ describe("MultiplexerDaemonHost", function () {
       host.handleControlRpc(1, createRpcRequest("startWSServer", {}))
     );
     assert.strictEqual(host.webSocketRequesterControlIds.size, 0);
+    assert.strictEqual(host.webSocketController, null);
+    assert.strictEqual(controllers[0].closeCalls, 1);
     await assert.rejects(() =>
       host.handleControlRpc(1, createRpcRequest("startWSServer", {}))
     );
 
     assert.strictEqual(calls, 2);
+    assert.strictEqual(host.webSocketController, null);
+    assert.strictEqual(controllers[1].closeCalls, 1);
   });
 
   it("sendMessageWithoutReply web broadcast returns when websocket is disabled or the server has not started", async function () {
@@ -2784,6 +2821,86 @@ describe("MultiplexerDaemonHost", function () {
         message: webMessages[0].message,
       },
     ]);
+  });
+
+  it("continuously retries USB ListSession until SessionList arrives", function () {
+    const originalSetTimeout = global.setTimeout;
+    const originalClearTimeout = global.clearTimeout;
+    const timers = createTimers();
+    global.setTimeout = timers.setTimeout;
+    global.clearTimeout = timers.clearTimeout;
+    try {
+      const { host, physical } = createHost({
+        memoizedNotificationTtlMs: 100,
+      });
+      const client = createClient(201);
+      physical.usbClients.set(client.clientId(), client);
+
+      sendAppMessageWithoutReply(
+        host,
+        1,
+        client.clientId(),
+        createListSessionMessage(client.clientId())
+      );
+      assert.strictEqual(client.state.sendMessageCalls.length, 1);
+      assert.strictEqual(timers.timers.length, 1);
+      assert.strictEqual(timers.timers[0].timeoutMs, 100);
+
+      timers.run(timers.timers[0]);
+      timers.run(timers.timers[1]);
+      assert.strictEqual(client.state.sendMessageCalls.length, 3);
+      assert.strictEqual(timers.timers.length, 3);
+
+      host.handlePhysicalMessage(
+        client.clientId(),
+        createSessionListMessage(client.clientId(), [])
+      );
+      assert.strictEqual(timers.timers[2].cleared, true);
+      timers.run(timers.timers[2]);
+      assert.strictEqual(client.state.sendMessageCalls.length, 3);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+      global.clearTimeout = originalClearTimeout;
+    }
+  });
+
+  it("continuously retries WiFi ListSession until SessionList arrives", function () {
+    const originalSetTimeout = global.setTimeout;
+    const originalClearTimeout = global.clearTimeout;
+    const timers = createTimers();
+    global.setTimeout = timers.setTimeout;
+    global.clearTimeout = timers.clearTimeout;
+    try {
+      const { host } = createHost({
+        enableWebSocket: true,
+        memoizedNotificationTtlMs: 100,
+      });
+      const client = createWebSocketClient(202, "runtime");
+      const { controller } = createWebSocketControllerState([client]);
+      host.webSocketController = controller;
+
+      host.handleWebSocketDriverMessage(
+        1,
+        client.clientId(),
+        createListSessionMessage(client.clientId())
+      );
+      assert.strictEqual(client.state.sendMessageCalls.length, 1);
+
+      timers.run(timers.timers[0]);
+      timers.run(timers.timers[1]);
+      assert.strictEqual(client.state.sendMessageCalls.length, 3);
+
+      host.handleWebSocketAppMessage(
+        client.clientId(),
+        createSessionListMessage(client.clientId(), [])
+      );
+      assert.strictEqual(timers.timers[2].cleared, true);
+      timers.run(timers.timers[2]);
+      assert.strictEqual(client.state.sendMessageCalls.length, 3);
+    } finally {
+      global.setTimeout = originalSetTimeout;
+      global.clearTimeout = originalClearTimeout;
+    }
   });
 
   it("retries ListSession after pending or cached data becomes stale", function () {
@@ -3425,6 +3542,44 @@ describe("MultiplexerDaemonHost", function () {
     );
   });
 
+  it("parses each runtime notification only once before routing", function () {
+    const { host } = createHost();
+    attachControlServer(host);
+    const innerMessage = JSON.stringify({
+      method: "Runtime.consoleAPICalled",
+    });
+    const message = JSON.stringify({
+      event: "Customized",
+      data: {
+        type: "CDP",
+        data: {
+          client_id: -1,
+          message: innerMessage,
+        },
+        sender: 0,
+      },
+    });
+    const originalParseJsonMessageOrNull = hostModule.__get__(
+      "parseJsonMessageOrNull"
+    );
+    const parsedMessages = [];
+    const restoreParseJsonMessageOrNull = hostModule.__set__(
+      "parseJsonMessageOrNull",
+      (value) => {
+        parsedMessages.push(value);
+        return originalParseJsonMessageOrNull(value);
+      }
+    );
+
+    try {
+      host.handlePhysicalMessage(31, message);
+    } finally {
+      restoreParseJsonMessageOrNull();
+    }
+
+    assert.deepStrictEqual(parsedMessages, [message, innerMessage]);
+  });
+
   it("drops responses from the wrong runtime without consuming the pending route", function () {
     const { host, physical } = createHost();
     const expectedClient = createClient(33);
@@ -3467,7 +3622,7 @@ describe("MultiplexerDaemonHost", function () {
       )
     );
 
-    assert.strictEqual(host.pendingRoutes.size, 1);
+    assert.notStrictEqual(host.pendingRoutes.get(globalId), null);
     assert.deepStrictEqual(controlServer.targeted, []);
     assert(
       warnings.some(
@@ -3489,7 +3644,7 @@ describe("MultiplexerDaemonHost", function () {
       )
     );
 
-    assert.strictEqual(host.pendingRoutes.size, 0);
+    assert.strictEqual(host.pendingRoutes.get(globalId), null);
     assert.strictEqual(controlServer.targeted.length, 1);
     assert.strictEqual(controlServer.targeted[0].controlId, 70);
     assert.deepStrictEqual(

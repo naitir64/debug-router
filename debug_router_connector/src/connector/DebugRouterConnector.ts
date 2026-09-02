@@ -41,30 +41,30 @@ type WebSocketServerCompat = {
 };
 
 /**
- * About forceRespawnDaemon:
+ * About enableDebugMode:
  * Debug/test-only escape hatch for daemon-global configuration.
  *
- * On this Connector's first daemon access, stop the daemon currently using
- * the same multiplexerDataDir and spawn a new daemon from this Connector's
- * daemon entry and daemon-global options. The replacement is one-shot and
- * disconnects every Connector sharing that daemon. Unlike normal shared
- * daemon startup, the replacement uses this Connector's manualConnect and
- * capability options exactly, so disabled-capability scenarios can be
- * tested. Closing this Connector force-stops the daemon and removes its
- * endpoint/lock artifacts instead of waiting for the daemon idle timeout.
- * Close never starts or reconnects a daemon, but it still cleans up a daemon
- * and artifacts already present in the selected multiplexerDataDir.
+ * On every daemon access that needs a new control connection, stop the daemon
+ * currently using the same multiplexerDataDir and spawn a new daemon from this
+ * Connector's daemon entry and daemon-global options. The replacement
+ * disconnects every Connector sharing that daemon. Unlike normal shared daemon
+ * startup, the replacement uses this Connector's manualConnect and capability
+ * options exactly, so disabled-capability scenarios can be tested. Closing this
+ * Connector force-stops the daemon and removes its endpoint/lock artifacts
+ * instead of waiting for the daemon idle timeout. Close never starts or
+ * reconnects a daemon, but it still cleans up a daemon and artifacts already
+ * present in the selected multiplexerDataDir.
  *
  * For deterministic tests, prefer:
  *   manualConnect: true,
- *   forceRespawnDaemon: true,
+ *   enableDebugMode: true,
  * followed by `await connector.connectDevices()`.
  */
 
 export type DebugRouterConnectorOption = PhysicalConnectorOption & {
   enableWebSocket?: boolean;
   connectionTrace?: ConnectionTraceOptions;
-  forceRespawnDaemon?: boolean;
+  enableDebugMode?: boolean;
   multiplexerDaemonIdleTimeout?: number;
   multiplexerStartupTimeout?: number;
   multiplexerRpcTimeout?: number;
@@ -92,12 +92,12 @@ export class DebugRouterConnector {
   private readonly events = new EventEmitter();
   private readonly daemonClient: MultiplexerDaemonClient;
   private readonly driverClient: DriverClient;
-  private readonly enableAndroid: boolean;
-  private readonly enableIOS: boolean;
+  private enableAndroid: boolean;
+  private enableIOS: boolean;
   private readonly enableHarmony: boolean;
-  private readonly enableDesktop: boolean;
+  private enableDesktop: boolean;
   private readonly enableNetworkDevice: boolean;
-  private readonly forceRespawnDaemon: boolean;
+  private readonly enableDebugMode: boolean;
   private selectedClient: MultiplexerUsbClient | undefined;
   private readonly websocketAppClients: Map<
     number,
@@ -117,26 +117,26 @@ export class DebugRouterConnector {
   private desiredWatchAllClientsStarted = false;
   private desiredRecoveryTimer: NodeJS.Timeout | null = null;
   private unsubscribeDaemonEvents: (() => void) | undefined;
-  private unsubscribeDaemonConnectionState: (() => void) | undefined;
+  private unsubscribeDaemonConnectionEvent: (() => void) | undefined;
 
   constructor(
     /**
      * Connector capability options are normally instance-local. The shared
      * daemon keeps the generally available capabilities enabled, while
      * each Connector filters the devices, clients, snapshots, and events it
-     * exposes. forceRespawnDaemon is the debug/test exception: its replacement
+     * exposes. enableDebugMode is the debug/test exception: its replacement
      * daemon receives this Connector's capability and manualConnect option
      * values exactly.
      *
      * Options without merge semantics (for example websocketOption,
      * adbHostPort, hdcHostPort, networkDeviceOpt, retry/trace output, daemon
      * idle/stale timeouts, and legacyDriverDir) remain daemon-global. A healthy
-     * daemon keeps its existing values; use forceRespawnDaemon only when a
+     * daemon keeps its existing values; use enableDebugMode only when a
      * debug/test scenario intentionally needs this Connector's values to win.
      */
     option: DebugRouterConnectorOption = {
       manualConnect: false,
-      forceRespawnDaemon: false,
+      enableDebugMode: false,
       enableWebSocket: false, // deprecated
       enableAndroid: true,
       enableIOS: true,
@@ -155,11 +155,11 @@ export class DebugRouterConnector {
     this.enableHarmony = option.enableHarmony ?? true;
     this.enableDesktop = option.enableDesktop ?? false;
     this.enableNetworkDevice = option.enableNetworkDevice ?? false;
-    this.forceRespawnDaemon = option.forceRespawnDaemon ?? false;
+    this.enableDebugMode = option.enableDebugMode ?? false;
     this.roomId = option.websocketOption?.roomId;
-    if (this.forceRespawnDaemon) {
+    if (this.enableDebugMode) {
       defaultLogger.warn(
-        "forceRespawnDaemon is enabled; the first daemon access will replace the daemon shared by this multiplexerDataDir using this Connector's local daemon entry and exact capability options, and closing this Connector will force-stop that daemon and clean its artifacts.",
+        "enableDebugMode is enabled; every daemon access that needs a new control connection will replace the daemon shared by this multiplexerDataDir using this Connector's local daemon entry and exact capability options, and closing this Connector will force-stop that daemon and clean its artifacts.",
       );
     }
 
@@ -183,13 +183,20 @@ export class DebugRouterConnector {
       multiplexerDaemonIdleTimeout:
         option.multiplexerDaemonIdleTimeout ??
         DEFAULT_MULTIPLEXER_DAEMON_IDLE_TIMEOUT,
-      forceRespawnDaemon: this.forceRespawnDaemon,
-      enableWebSocket: this.forceRespawnDaemon ? this.enableWebSocket : true,
+      enableDebugMode: this.enableDebugMode,
+      enableWebSocket: this.enableDebugMode ? this.enableWebSocket : true,
       websocketOption: option.websocketOption,
       connectionTrace: createDaemonConnectionTraceOption(option),
       physicalConnectorOption: createDaemonPhysicalConnectorOption(
-        option,
-        this.forceRespawnDaemon,
+        {
+          ...option,
+          enableAndroid: this.enableAndroid,
+          enableIOS: this.enableIOS,
+          enableHarmony: this.enableHarmony,
+          enableDesktop: this.enableDesktop,
+          enableNetworkDevice: this.enableNetworkDevice,
+        },
+        this.enableDebugMode,
       ),
     });
 
@@ -201,9 +208,9 @@ export class DebugRouterConnector {
     this.unsubscribeDaemonEvents = this.daemonClient.subscribe((event) =>
       this.applyHostEvent(event),
     );
-    this.unsubscribeDaemonConnectionState = this.daemonClient.subscribeConnectionState(
-      (state) => {
-        if (state.state === "disconnected") {
+    this.unsubscribeDaemonConnectionEvent = this.daemonClient.subscribeConnectionEvent(
+      (event) => {
+        if (event.state === "disconnected") {
           this.handleDaemonDisconnected();
           return;
         }
@@ -331,18 +338,18 @@ export class DebugRouterConnector {
     this.closed = true;
     this.unsubscribeDaemonEvents?.();
     this.unsubscribeDaemonEvents = undefined;
-    this.unsubscribeDaemonConnectionState?.();
-    this.unsubscribeDaemonConnectionState = undefined;
+    this.unsubscribeDaemonConnectionEvent?.();
+    this.unsubscribeDaemonConnectionEvent = undefined;
     this.clearDesiredRecoveryTimer();
-    if (this.forceRespawnDaemon) {
+    if (this.enableDebugMode) {
       try {
         defaultLogger.info(
-          "forceRespawnDaemon Connector is closing; force-stopping the current daemon and cleaning its artifacts.",
+          "Debug-mode Connector is closing; force-stopping the current daemon and cleaning its artifacts.",
         );
         await this.daemonClient.forceStopDaemon();
       } catch (error) {
         defaultLogger.warn(
-          `Failed to force-stop daemon while closing forceRespawnDaemon Connector: ${
+          `Failed to force-stop daemon while closing debug-mode Connector: ${
             (error as Error).message
           }`,
         );

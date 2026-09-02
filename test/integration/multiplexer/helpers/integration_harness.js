@@ -174,7 +174,7 @@ function createIntegrationContext(name, option = {}) {
     createConnector(extra = {}) {
       const connector = new DebugRouterConnector({
         manualConnect: true,
-        forceRespawnDaemon: extra.forceRespawnDaemon ?? false,
+        enableDebugMode: extra.enableDebugMode ?? false,
         enableAndroid: extra.enableAndroid ?? true,
         enableIOS: extra.enableIOS ?? false,
         enableHarmony: extra.enableHarmony ?? false,

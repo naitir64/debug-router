@@ -120,7 +120,6 @@ export class PhysicalConnector {
     if (this.usbConnectOpt.retryTime < 3000) {
       this.usbConnectOpt.retryTime = 3000;
     }
-    this.setOptionByEnv();
     this.traceRecorder = option.traceRecorder ?? null;
     this.devicesManager = new Set<DeviceManager>();
     if (this.enableAndroid) {
@@ -349,21 +348,6 @@ export class PhysicalConnector {
       return true;
     }
     return false;
-  }
-
-  private setOptionByEnv() {
-    if (process.env.DriverEnableAndroid === "false") {
-      this.enableAndroid = false;
-      defaultLogger.warn("set DriverEnableAndroid === false");
-    }
-    if (process.env.DriverEnableIOS === "false") {
-      this.enableIOS = false;
-      defaultLogger.warn("set DriverEnableIOS === false");
-    }
-    if (process.env.DriverEnableDesktop === "false") {
-      this.enableDesktop = false;
-      defaultLogger.warn("set DriverEnableDesktop === false");
-    }
   }
 
   // ======================================

@@ -25,17 +25,24 @@ export type MemoizedQueryDecision =
   | {
       action: "cached";
       message: string;
+      parsedValue: unknown;
     };
 
 export type MemoizedQueryTableOption = {
   definitions?: readonly MemoizedQueryDefinition[];
-  ttlMs?: number;
+  validityPeriodMs?: number;
   now?: () => number;
 };
 
 type MemoizedNotification = {
   message: string;
+  parsedValue: unknown;
   receivedAt: number;
+};
+
+type PendingQuery = {
+  sentAt: number;
+  timer?: ReturnType<typeof setTimeout>;
 };
 
 const DEFAULT_QUERY_DEFINITIONS: readonly MemoizedQueryDefinition[] = [
@@ -51,12 +58,16 @@ export class MemoizedQueryTable {
     number,
     Map<string, MemoizedNotification>
   >();
-  private readonly pendingQueries = new Map<number, Map<string, number>>();
-  private readonly ttlMs: number;
+  private readonly pendingQueries = new Map<
+    number,
+    Map<string, PendingQuery>
+  >();
+  private readonly validityPeriodMs: number;
   private readonly now: () => number;
 
   constructor(option: MemoizedQueryTableOption = {}) {
-    this.ttlMs = option.ttlMs ?? DEFAULT_MEMOIZED_QUERY_TTL_MS;
+    this.validityPeriodMs =
+      option.validityPeriodMs ?? DEFAULT_MEMOIZED_QUERY_TTL_MS;
     this.now = option.now ?? Date.now;
     this.definitions = option.definitions ?? DEFAULT_QUERY_DEFINITIONS;
   }
@@ -77,6 +88,7 @@ export class MemoizedQueryTable {
       return {
         action: "cached",
         message: cached.message,
+        parsedValue: cached.parsedValue,
       };
     }
 
@@ -93,13 +105,17 @@ export class MemoizedQueryTable {
     };
   }
 
-  recordNotification(clientId: number, message: string): boolean {
-    const notificationType = getCustomizedType(parseJsonOrNull(message));
+  recordNotification(
+    clientId: number,
+    message: string,
+    parsedValue: unknown,
+  ): void {
+    const notificationType = getCustomizedType(parsedValue);
     const requestType = this.definitions.find(
       (definition) => definition.notificationType === notificationType,
     )?.requestType;
     if (!notificationType || !requestType) {
-      return false;
+      return;
     }
 
     let clientNotifications = this.notifications.get(clientId);
@@ -109,24 +125,45 @@ export class MemoizedQueryTable {
     }
     clientNotifications.set(notificationType, {
       message,
+      parsedValue,
       receivedAt: this.now(),
     });
     this.clearPending(clientId, requestType);
-    return true;
   }
 
   handleSendFailure(clientId: number, requestType: string): void {
     this.clearPending(clientId, requestType);
   }
 
+  setRetryTimer(
+    clientId: number,
+    requestType: string,
+    retry: () => boolean,
+  ): void {
+    const pendingQuery = this.pendingQueries.get(clientId)!.get(requestType)!;
+    pendingQuery.timer = this.createRetryTimer(
+      clientId,
+      requestType,
+      pendingQuery,
+      retry,
+    );
+  }
+
   clearClient(clientId: number): void {
     this.notifications.delete(clientId);
-    this.pendingQueries.delete(clientId);
+    const clientPendingQueries = this.pendingQueries.get(clientId);
+    clientPendingQueries?.forEach((_pendingQuery, requestType) => {
+      this.clearPending(clientId, requestType);
+    });
   }
 
   clear(): void {
     this.notifications.clear();
-    this.pendingQueries.clear();
+    this.pendingQueries.forEach((clientPendingQueries, clientId) => {
+      clientPendingQueries.forEach((_pendingQuery, requestType) => {
+        this.clearPending(clientId, requestType);
+      });
+    });
   }
 
   private getFreshNotification(
@@ -138,32 +175,35 @@ export class MemoizedQueryTable {
     if (!notification) {
       return null;
     }
-    if (this.now() - notification.receivedAt > this.ttlMs) {
+    if (this.now() - notification.receivedAt > this.validityPeriodMs) {
       return null;
     }
     return notification;
   }
 
   private isPending(clientId: number, requestType: string): boolean {
-    const sentAt = this.pendingQueries.get(clientId)?.get(requestType);
-    if (sentAt === undefined) {
+    const pendingQuery = this.pendingQueries.get(clientId)?.get(requestType);
+    if (!pendingQuery) {
       return false;
     }
-    if (this.now() - sentAt <= this.ttlMs) {
-      return true;
+    if (this.now() - pendingQuery.sentAt > this.validityPeriodMs) {
+      // The pending query has expired and can no longer be reused.
+      this.clearPending(clientId, requestType);
+      return false;
     }
 
-    this.clearPending(clientId, requestType);
-    return false;
+    return true;
   }
 
   private markPending(clientId: number, requestType: string): void {
     let clientPendingQueries = this.pendingQueries.get(clientId);
     if (!clientPendingQueries) {
-      clientPendingQueries = new Map<string, number>();
+      clientPendingQueries = new Map<string, PendingQuery>();
       this.pendingQueries.set(clientId, clientPendingQueries);
     }
-    clientPendingQueries.set(requestType, this.now());
+    clientPendingQueries.set(requestType, {
+      sentAt: this.now(),
+    });
   }
 
   private clearPending(clientId: number, requestType: string): void {
@@ -171,10 +211,47 @@ export class MemoizedQueryTable {
     if (!clientPendingQueries) {
       return;
     }
+    const pendingQuery = clientPendingQueries.get(requestType);
+    if (!pendingQuery) {
+      return;
+    }
+    this.clearRetryTimer(pendingQuery);
     clientPendingQueries.delete(requestType);
     if (clientPendingQueries.size === 0) {
       this.pendingQueries.delete(clientId);
     }
+  }
+
+  private createRetryTimer(
+    clientId: number,
+    requestType: string,
+    pendingQuery: PendingQuery,
+    retry: () => boolean,
+  ): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => {
+      pendingQuery.sentAt = this.now();
+      if (!retry()) {
+        this.clearPending(clientId, requestType);
+        return;
+      }
+
+      pendingQuery.timer = this.createRetryTimer(
+        clientId,
+        requestType,
+        pendingQuery,
+        retry,
+      );
+    }, this.validityPeriodMs);
+    timer.unref?.();
+    return timer;
+  }
+
+  private clearRetryTimer(pendingQuery: PendingQuery): void {
+    if (pendingQuery.timer === undefined) {
+      return;
+    }
+    clearTimeout(pendingQuery.timer);
+    pendingQuery.timer = undefined;
   }
 }
 
@@ -184,12 +261,4 @@ function getCustomizedType(message: unknown): string | null {
     return null;
   }
   return typeof data?.data?.type === "string" ? data.data.type : null;
-}
-
-function parseJsonOrNull(message: string): unknown | null {
-  try {
-    return JSON.parse(message);
-  } catch (_error) {
-    return null;
-  }
 }

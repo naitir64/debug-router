@@ -186,7 +186,7 @@ Current public facade behavior:
 - `getAllWebsocketAppClients()` and `getAllAppClients()` continue to expose WiFi runtimes through `MultiplexerWebSocketClient` proxies. Proxy send and close operations become daemon RPCs.
 - `sendMessageToWeb()` and `sendMessageToApp()` keep the original public call shape, but both forward through the daemon's unified `sendMessageWithoutReply` RPC.
 - `disableAllClients()` and `addDeviceManager()` no longer operate on physical objects in the Multiplexer-only facade; they only log warnings.
-- In the normal path, `close()` only closes the current Connector's control socket, removes subscriptions, and clears its WebSocket-server mirror. It does not directly close the shared daemon; daemon shutdown is controlled by idle timeout or shutdown/replacement flow. `forceRespawnDaemon` is a debug/test-only exception: closing such a Connector force-stops the current daemon and cleans its artifacts.
+- In the normal path, `close()` only closes the current Connector's control socket, removes subscriptions, and clears its WebSocket-server mirror. It does not directly close the shared daemon; daemon shutdown is controlled by idle timeout or shutdown/replacement flow. `enableDebugMode` is a debug/test-only exception: every `ensureDaemon()` replaces the current daemon, and closing such a Connector force-stops the daemon and cleans its artifacts.
 
 When the daemon control socket disconnects, the facade clears local mirrors, rejects pending RPCs, and schedules desired-state recovery after 100 ms: reconnect the daemon, restore device discovery, restore `startAllDeviceClientWatchers()`, and restore a previously requested WebSocket server.
 
@@ -194,7 +194,7 @@ When the daemon control socket disconnects, the facade clears local mirrors, rej
 
 When `DebugRouterConnector` forwards some behavior to the daemon, it calls `MultiplexerDaemonClient.call()`. This method validates the method-specific RPC parameters and ensures an available daemon by default. Daemon replacement passes `ensureDaemon: false` to send the shutdown RPC without starting another daemon, while `sendRpc()` is the private send path after registration.
 
-`MultiplexerDaemonClient.connect()` owns connection idempotency through its in-flight `connecting` Promise. Manager does not keep a second `ensureDaemon()` Promise; one production facade constructs one DaemonClient and one Manager, while different facades coordinate daemon startup through `spawn.lock`.
+`MultiplexerDaemonClient.connect()` owns connection idempotency through its in-flight `connectPromise`. Manager does not keep a second `ensureDaemon()` Promise; one production facade constructs one DaemonClient and one Manager, while different facades coordinate daemon startup through `spawn.lock`.
 
 `MultiplexerDiscovery.probeHealth()` opens the fixed endpoint, sends a framed `{ kind: "health" }` first message, validates the framed `health-response`, and compares protocol versions. A normal health response contains `kind`, `ok`, `protocolVersion`, and `isInUse`; optional `debugInfo` remains diagnostic and is not used for cleanup or feature detection. `isInUse` follows the daemon idle-consumer definition: it is true when at least one registered Connector control client or Driver WebSocket frontend is connected. The temporary Health socket and WiFi runtime/app connections do not count.
 
@@ -596,7 +596,7 @@ frontend <-- SessionList -- SDK runtime
 
 `SessionList` is an independent notification rather than a response carrying the same id. Under the normal SDK-initiated broadcast rule, one notification is delivered to every WebSocket Driver frontend and control client. If 30 frontends send `ListSession` concurrently, the SDK produces 30 `SessionList` notifications and each is broadcast to 30 frontends, resulting in 900 subscription deliveries; message volume grows quadratically. In real-device stress testing, 20 connectors sending `ListSession` concurrently caused the phone to crash under memory pressure.
 
-The solution is to memoize this query pattern: Host records the latest `SessionList` emitted by the SDK. When a frontend sends `ListSession` again, a fresh cache entry is returned directly to that requester without accessing the SDK. If no cache exists, only the first query arriving within the short window is forwarded; the remaining queries converge on the same pending state and wait for the SDK notification to follow its original broadcast path. This prevents the broadcast storm without changing the SDK notification format or the initial notification's broadcast semantics.
+The solution is to memoize this query pattern: Host records the latest `SessionList` emitted by the SDK. When a frontend sends `ListSession` again, a fresh cache entry is returned directly to that requester without accessing the SDK. If no cache exists, only the first query arriving within the short window is forwarded; the remaining queries converge on the same pending state and wait for the SDK notification to follow its original broadcast path. While that notification is missing, one timer per runtime and request type resends the original query after each validity period. This prevents the broadcast storm without changing the SDK notification format or the initial notification's broadcast semantics, while recovering without requiring another frontend query.
 
 The current audit of SDK native `Processor::process()` and the `Customized` protocol branches is:
 
@@ -623,10 +623,11 @@ If another message gains the same semantics, only a request/notification mapping
 
 1. Determining whether a request is memoizable from the outer `Customized` `data.type`.
 2. Storing the latest notification and receive time by runtime client id and notification type.
-3. Storing an SDK query and send time by runtime client id and request type while it is pending.
+3. Storing an SDK query send time, retry callback, and retry timer by runtime client id and request type while it is pending.
 4. Returning a `not-memoized`, `forward`, `pending`, or `cached` decision.
 5. Refreshing the cache and releasing the matching pending state when an SDK notification arrives.
-6. Cleaning pending/cache state after runtime send failure, runtime disconnect, or Host reset.
+6. Retrying a pending query after each validity period until its matching notification arrives.
+7. Cancelling retry timers and cleaning pending/cache state after runtime send failure, runtime disconnect, or Host reset.
 
 Core state is isolated by runtime client:
 
@@ -636,20 +637,25 @@ notifications: Map<clientId, Map<notificationType, {
   receivedAt: number;
 }>>;
 
-pendingQueries: Map<clientId, Map<requestType, sentAt>>;
+pendingQueries: Map<clientId, Map<requestType, {
+  sentAt: number;
+  timer?: NodeJS.Timeout;
+  retry?: () => boolean;
+}>>;
 ```
 
 A global cache keyed only by message type would be incorrect because runtime A's `SessionList` could be returned to a frontend querying runtime B. The cache stores the complete notification string after Host rewrites the real runtime client id, so a cache hit can be sent directly through the original control or WebSocket frontend channel. An empty `SessionList` is valid and is memoized in the same way as a non-empty list.
 
-The default TTL is 1000 ms, shared by cached notifications and pending queries:
+The default validity period is 1000 ms, shared by cached notifications and pending queries:
 
-- `now - receivedAt <= TTL`: the cache is fresh, return `cached`.
-- `now - sentAt <= TTL`: an SDK query is already pending, return `pending`.
-- Age greater than TTL: the state is stale, allow a new request to return `forward`.
+- `now - receivedAt <= validityPeriodMs`: the cache is fresh, return `cached`.
+- `now - sentAt <= validityPeriodMs`: an SDK query is already pending, return `pending`.
+- When a pending retry timer expires, resend the query directly to the same runtime and start the next validity period.
+- If a delayed timer has not run and the pending age is greater than `validityPeriodMs`, a new request clears that stale pending state and returns `forward`.
 
-A missing, negative, or non-finite TTL falls back to the default; `0` is valid. An entry whose age equals the TTL remains fresh and becomes stale only when `age > TTL`.
+A missing validity period uses the default. An entry whose age equals the validity period remains fresh and becomes stale only when `age > validityPeriodMs`.
 
-Pending state must also recover on timeout. If the SDK never emits the expected notification, or the notification is lost in transit, permanent pending state would suppress every later `ListSession`.
+Pending state must also recover without another frontend request. If the SDK never emits the expected notification, or the notification is lost in transit, the table keeps one retry timer for that runtime and request type and resends the query once per validity period. The loop ends when the notification arrives, the runtime disappears, delivery throws, or lifecycle cleanup clears the table.
 
 #### 11.2.3 Host Integration Flow
 
@@ -658,10 +664,11 @@ Before a frontend message is sent to a runtime:
 1. Host parses JSON and normalizes `client_id`.
 2. Host calls `MemoizedQueryTable.query(clientId, data)` to decide whether this request should be memoized.
 3. `not-memoized`: this request is outside the memoization scope, so normal message-id rewriting and runtime delivery continue. Valid outer JSON that is unrelated, has no recognized `Customized` type, or uses an unconfigured type enters this branch; invalid outer JSON is rejected before reaching the table.
-4. `forward`: the request is memoizable, but there is no fresh cache or valid pending state; record pending and forward only this request to the SDK runtime.
+4. `forward`: the request is memoizable, but there is no fresh cache or valid pending state; record pending, forward only this request to the SDK runtime, and start its retry timer after delivery succeeds.
 5. `pending`: there is no cache, but an earlier request of the same type was already sent to the SDK through `forward`; do not send a duplicate, and wait for the SDK notification to reach all current requesters through the original broadcast path.
 6. `cached`: a memoized, unexpired entry exists; do not access the SDK, and send the cached notification only to the current control client or WebSocket frontend.
 7. If synchronous delivery to the real USB/WiFi runtime throws, Host calls `handleSendFailure()` to release pending immediately so the next request can retry.
+8. If the timer expires first, Host uses the saved, already-normalized query to send directly to the current USB/WiFi runtime. A successful retry renews the timer; a missing runtime or send failure releases pending and stops the loop.
 
 When an SDK runtime message enters Host:
 
@@ -691,13 +698,18 @@ sequenceDiagram
     T-->>H: pending
     Note over B,H: Do not send a duplicate SDK query; wait for the notification fanout
 
+    loop Each validity period while SessionList is missing
+        T-->>H: retry saved ListSession
+        H->>S: ListSession
+    end
+
     S-->>H: SessionList
     H->>T: recordNotification(clientId, message)
     T-->>H: Refresh cache and clear pending
     H-->>A: broadcast SessionList
     H-->>B: broadcast SessionList
 
-    A->>H: ListSession again within TTL
+    A->>H: ListSession again within the validity period
     H->>T: query(clientId, data)
     T-->>H: cached SessionList
     H-->>A: targeted SessionList
@@ -707,12 +719,12 @@ sequenceDiagram
 
 Memoized state belongs to the real runtime connections currently held by Host and cannot be reused across runtime lifecycles:
 
-- `client-disconnected`: call `clearClient(clientId)` to clear that runtime's cache and pending state.
-- Physical discovery reset, legacy owner loss, or Host stop: call `clear()`.
+- `client-disconnected`: call `clearClient(clientId)` to cancel that runtime's retry timers and clear its cache and pending state.
+- Physical discovery reset, legacy owner loss, or Host stop: call `clear()` to cancel all retry timers and clear all memoized state.
 - Control client or WebSocket frontend disconnect: keep runtime cache because it belongs to the runtime, not to one frontend.
 - A single runtime send failure: release only that client/request type's pending state without clearing other runtime caches.
 
-This reduces 30 concurrent `ListSession` requests to one SDK query and one notification fanout to 30 frontends, or 30 subscription deliveries. Later individual queries within the TTL each receive one targeted cached result instead of creating a 30 x 30 broadcast storm.
+This reduces 30 concurrent `ListSession` requests to one initial SDK query and, only while its notification is missing, one retry per validity period. A resulting notification is still fanned out once to 30 frontends, or 30 subscription deliveries. Later individual queries within the validity period each receive one targeted cached result instead of creating a 30 x 30 broadcast storm.
 
 ## 12. Legacy Multi-open Owner Compatibility
 
@@ -750,7 +762,7 @@ Later `connectDevices()`, `startAllDeviceClientWatchers()`, and desired-state re
 
 ### 13.1 Daemon Crash or Control Socket Disconnect
 
-After daemon crash, the connector's control socket closes. `MultiplexerDaemonClient.closeSocket()` rejects pending RPCs and notifies connection-state listeners. `DebugRouterConnector` receives disconnected state, clears local mirrors, then schedules desired-state recovery.
+After daemon crash, the connector's control socket closes. `MultiplexerDaemonClient.closeSocket()` rejects pending RPCs and emits a disconnected connection event. `DebugRouterConnector` receives the event, clears local mirrors, then schedules desired-state recovery.
 
 Recovery flow:
 
@@ -767,7 +779,7 @@ State recovery converges on daemon snapshot. Even if an earlier control message 
 | Local device, USB runtime, and WebSocket client mirrors | Connector facade                         | Rebuilt from snapshot; the WebSocket portion is restored only for a facade that requests `startWSServer()` again.                                                                                                                 |
 | Connector pending RPC                                   | Connector-side `MultiplexerDaemonClient` | Rejected when control socket disconnects; caller retries through existing logic.                                                                                                                                                  |
 | pending route                                           | Daemon-side `PendingRouteTable`          | Created for request lifecycle; cleared on control/WebSocket disconnect, Host reset, or timeout.                                                                                                                                   |
-| memoized notification query                             | Daemon-side `MemoizedQueryTable`         | Starts empty after daemon recovery and is repopulated opportunistically by matching runtime notifications; isolated by runtime client; cleared on runtime disconnect or Host/physical reset; stale entries are ignored after TTL. |
+| memoized notification query                             | Daemon-side `MemoizedQueryTable`         | Starts empty after daemon recovery and is repopulated by matching runtime notifications; isolated by runtime client; retries pending queries once per validity period; cancels timers and clears state on runtime disconnect or Host/physical reset. |
 | WiFi runtime / WebSocket frontend connection            | Daemon-side `WebSocketController`        | The app/frontend reconnects after WebSocket disconnect; Driver count is used for daemon idle detection, while requester-targeted snapshots and facade-side filtering restore the WebSocket mirrors.                               |
 
 ### 13.2 Daemon Idle Auto-shutdown
@@ -812,13 +824,13 @@ Current Multiplexer-related `DebugRouterConnectorOption` fields:
 | `multiplexerLegacyDriverDir`   | Directory containing the legacy `LatestDriverProcess`.                                               |
 | `enableWebSocket`              | Enables WebSocket exposure for this facade; daemon startup behavior is shared.                       |
 | `connectionTrace`              | Daemon-global trace configuration; only serializable string output paths cross the process boundary. |
-| `forceRespawnDaemon`           | Debug/test-only one-shot replacement using this Connector's exact options.                           |
+| `enableDebugMode`              | Debug/test-only replacement on every daemon ensure using this Connector's exact options.             |
 | `websocketOption.port`         | Retained for the legacy option shape but ignored; selection starts at 19783.                         |
 | `websocketOption.roomId`       | Room id returned by WebSocket `RoomJoined`.                                                          |
 
-`MultiplexerDaemonHostOption.memoizedNotificationTtlMs` controls the daemon-side pending and cache TTL and defaults to 1000 ms. It is currently an internal Host option used for embedding and deterministic tests, not a public `DebugRouterConnectorOption` propagated through daemon startup.
+`MultiplexerDaemonHostOption.memoizedNotificationTtlMs` controls the daemon-side cache validity period and pending retry interval and defaults to 1000 ms. It is currently an internal Host option used for embedding and deterministic tests, not a public `DebugRouterConnectorOption` propagated through daemon startup.
 
-The daemon-side `PhysicalConnector` receives transport endpoints and serializable options such as `adbHostPort`, `hdcHostPort`, `usbConnectOpt`, `networkDeviceOpt`, and `connectionTrace`. In the normal shared-daemon path, generally available platform options are enabled in the daemon and each Connector filters the devices, clients, snapshots, and events it exposes according to its own option flags. Only `forceRespawnDaemon` makes the replacement daemon use that Connector's `manualConnect`, WebSocket, and platform enable flags exactly. The daemon entry validates `connectionTrace.enabled` as boolean, `connectionTrace.output` as a string path, and `connectionTrace.bufferSize` as a non-negative finite number; recorder instances are rejected. `reportService` is not serialized across the process boundary; the daemon creates its own local report service.
+The daemon-side `PhysicalConnector` receives transport endpoints and serializable options such as `adbHostPort`, `hdcHostPort`, `usbConnectOpt`, `networkDeviceOpt`, and `connectionTrace`. In the normal shared-daemon path, generally available platform options are enabled in the daemon and each Connector filters the devices, clients, snapshots, and events it exposes according to its own option flags. Only `enableDebugMode` makes each replacement daemon use that Connector's `manualConnect`, WebSocket, and platform enable flags exactly. The daemon entry validates `connectionTrace.enabled` as boolean, `connectionTrace.output` as a string path, and `connectionTrace.bufferSize` as a non-negative finite number; recorder instances are rejected. `reportService` is not serialized across the process boundary; the daemon creates its own local report service.
 
 The public facade no longer treats `enableMultiplexer`, `enableProxy`, `proxyDaemonIdleTimeout`, or `DEBUG_ROUTER_PROXY*` as compatibility entries. Callers should use the `multiplexer*` naming.
 
@@ -869,9 +881,10 @@ Protocol compatibility rules:
 
 1. The first frontend sends `ListSession` for a runtime client. Host records a pending query and forwards it to the SDK runtime.
 2. Other frontends send `ListSession` for the same runtime within 1000 ms. Host coalesces these queries and does not send duplicate runtime messages.
-3. The runtime sends `SessionList`. Host records the complete rewritten notification, clears the pending marker, and broadcasts the notification through the original WebSocket and control event paths.
-4. A frontend sends another `ListSession` while the recorded notification is fresh. Host sends the cached `SessionList` only to that frontend.
-5. After the TTL expires, the next `ListSession` is forwarded to the runtime again so the cached session state is refreshed.
+3. If no `SessionList` arrives within the validity period, Host resends the saved query directly to that runtime and repeats this step once per validity period.
+4. The runtime sends `SessionList`. Host records the complete rewritten notification, cancels the retry timer, clears the pending marker, and broadcasts the notification through the original WebSocket and control event paths.
+5. A frontend sends another `ListSession` while the recorded notification is fresh. Host sends the cached `SessionList` only to that frontend.
+6. After the cached notification expires, the next `ListSession` starts a new pending and retry lifecycle.
 
 ## 16. Validation Coverage
 

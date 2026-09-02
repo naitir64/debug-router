@@ -8,13 +8,6 @@ const { EventEmitter } = require("events");
 const {
   WebSocketClient,
 } = require("../../../../debug_router_connector/dist/cjs/src/websocket/WebSocketConnection");
-const {
-  Client,
-} = require("../../../../debug_router_connector/dist/cjs/src/connector/Client");
-
-function nextTick() {
-  return new Promise((resolve) => setImmediate(resolve));
-}
 
 function createSocket() {
   const socket = new EventEmitter();
@@ -116,7 +109,6 @@ function createCustomizedMessage({
   result,
   clientId = -1,
   sender = 0,
-  messageAsString = true,
 }) {
   const inner =
     result === undefined
@@ -136,7 +128,7 @@ function createCustomizedMessage({
       data: {
         client_id: clientId,
         session_id: -1,
-        message: messageAsString ? JSON.stringify(inner) : inner,
+        message: JSON.stringify(inner),
       },
       sender,
     },
@@ -144,14 +136,6 @@ function createCustomizedMessage({
 }
 
 describe("WebSocketClient", function () {
-  beforeEach(function () {
-    Client.messageIdCounter = 1;
-  });
-
-  afterEach(function () {
-    Client.messageIdCounter = 0;
-  });
-
   it("sends Driver Customized messages to the target app with the originating web client id", function () {
     const server = createServer();
     const socket = createSocket();
@@ -316,81 +300,6 @@ describe("WebSocketClient", function () {
         fromWebClientId: 500,
       },
     ]);
-  });
-
-  it("resolves sendCustomizedMessage when a matching websocket response arrives", async function () {
-    const server = createServer();
-    const socket = createSocket();
-    const client = new WebSocketClient(
-      server,
-      createInfo(600, "runtime"),
-      socket
-    );
-
-    const promise = client.sendCustomizedMessage("Runtime.evaluate", {
-      expression: "1 + 1",
-    });
-    assert.strictEqual(socket.sent.length, 1);
-    const sent = JSON.parse(socket.sent[0]);
-    const sentId = sent.data.data.message.id;
-
-    socket.emit(
-      "message",
-      JSON.stringify(
-        createCustomizedMessage({
-          id: sentId,
-          result: {
-            value: 2,
-          },
-          sender: 100,
-          messageAsString: true,
-        })
-      )
-    );
-
-    assert.strictEqual(
-      await promise,
-      JSON.stringify({
-        id: sentId,
-        result: {
-          value: 2,
-        },
-      })
-    );
-  });
-
-  it("does not resolve pending requests from malformed Customized payloads", async function () {
-    const server = createServer();
-    const socket = createSocket();
-    const client = new WebSocketClient(
-      server,
-      createInfo(601, "runtime"),
-      socket
-    );
-    const promise = client.sendCustomizedMessage("Runtime.evaluate");
-
-    socket.emit(
-      "message",
-      JSON.stringify({
-        event: "Customized",
-        data: {
-          data: {
-            message: {
-              id: JSON.parse(socket.sent[0]).data.data.message.id,
-            },
-          },
-          sender: 100,
-        },
-      })
-    );
-    await nextTick();
-
-    assert.deepStrictEqual(server.calls.handleWebSocketAppMessage.length, 1);
-    assert.strictEqual(socket.sent.length, 1);
-    client.pendingRequests.forEach((pending) =>
-      pending.reject(new Error("cancel test request"))
-    );
-    await assert.rejects(() => promise, /cancel test request/);
   });
 
   it("notifies the server when the socket closes", function () {

@@ -6,10 +6,4 @@ export abstract class Client {
   protected static messageIdCounter = 1;
   abstract clientId(): number;
   abstract close(): void;
-  abstract sendCustomizedMessage(
-    method: string,
-    params: Object,
-    sessionId: number,
-    type: string,
-  ): Promise<string>;
 }

@@ -19,6 +19,7 @@ import {
   MultiplexerDiscovery,
   MultiplexerDiscoveryValidation,
 } from "./MultiplexerDiscovery";
+import type { MultiplexerDaemonClient } from "./MultiplexerDaemonClient";
 
 export const DEFAULT_MULTIPLEXER_STARTUP_TIMEOUT = 5000;
 export const DEFAULT_MULTIPLEXER_READY_POLL_INTERVAL = 50;
@@ -28,7 +29,6 @@ const MULTIPLEXER_HEALTH_PROBE_RETRY_COUNT = 3;
 
 export type MultiplexerDaemonReplaceReason =
   | "daemon-protocol-older-than-connector"
-  | "force-respawn"
   | "force-stop";
 
 export type SpawnedDaemonProcess = {
@@ -40,14 +40,6 @@ export type MultiplexerDaemonSpawn = (
   args: string[],
   options: SpawnOptions,
 ) => SpawnedDaemonProcess;
-
-type MultiplexerDaemonControlClient = {
-  call(
-    method: "shutdownDaemon",
-    params: { reason?: string },
-    ensureDaemon?: boolean,
-  ): Promise<unknown>;
-};
 
 export type MultiplexerDaemonManagerOption = {
   // Required daemon lifecycle dependencies.
@@ -61,7 +53,7 @@ export type MultiplexerDaemonManagerOption = {
   // Optional manager tuning with constructor defaults.
   startupTimeout?: number;
   localProtocolVersion?: number;
-  forceRespawnDaemon?: boolean;
+  enableDebugMode?: boolean;
   readyPollInterval?: number;
   replacementTimeout?: number;
 
@@ -96,6 +88,7 @@ export class MultiplexerDaemonManager {
   readonly debugInfo?: MultiplexerDebugInfo;
   readonly legacyDriverDir?: string;
   readonly multiplexerDaemonIdleTimeout: number;
+  readonly enableDebugMode: boolean;
   readonly enableWebSocket?: boolean;
   readonly connectionTrace?: ConnectionTraceOptions;
   readonly websocketOption?: {
@@ -112,8 +105,7 @@ export class MultiplexerDaemonManager {
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly sleepFor: (duration: number) => Promise<void>;
   private readonly now: () => number;
-  private forceRespawnDaemonPending: boolean;
-  private daemonClient?: MultiplexerDaemonControlClient;
+  private daemonClient?: MultiplexerDaemonClient;
 
   constructor(option: MultiplexerDaemonManagerOption) {
     this.discovery = option.discovery;
@@ -128,7 +120,7 @@ export class MultiplexerDaemonManager {
     this.debugInfo = option.debugInfo;
     this.legacyDriverDir = option.legacyDriverDir;
     this.multiplexerDaemonIdleTimeout = option.multiplexerDaemonIdleTimeout;
-    this.forceRespawnDaemonPending = option.forceRespawnDaemon ?? false;
+    this.enableDebugMode = option.enableDebugMode ?? false;
     this.enableWebSocket = option.enableWebSocket;
     this.connectionTrace = option.connectionTrace;
     this.websocketOption = option.websocketOption;
@@ -148,11 +140,11 @@ export class MultiplexerDaemonManager {
     this.now = option.now ?? Date.now;
   }
 
-  setDaemonClient(daemonClient: MultiplexerDaemonControlClient): void {
+  setDaemonClient(daemonClient: MultiplexerDaemonClient): void {
     this.daemonClient = daemonClient;
   }
 
-  async stopDaemonForDebugging(): Promise<void> {
+  async stopDaemonForDebugging(withRespawn: boolean = false): Promise<void> {
     while (!this.acquireSpawnLock()) {
       await this.sleepFor(this.readyPollInterval);
     }
@@ -167,14 +159,18 @@ export class MultiplexerDaemonManager {
       } else {
         await this.forceStopDaemon();
       }
+      if (withRespawn) {
+        this.spawnDaemon();
+        await this.waitUntilReady(this.startupTimeout);
+      }
     } finally {
       this.releaseSpawnLock();
     }
   }
 
   async ensureDaemon(): Promise<void> {
-    if (this.forceRespawnDaemonPending) {
-      return this.forceRespawnDaemon();
+    if (this.enableDebugMode) {
+      return this.stopDaemonForDebugging(true);
     }
 
     while (true) {
@@ -184,7 +180,7 @@ export class MultiplexerDaemonManager {
     }
   }
 
-  async handleDiscoveryResult(
+  private async handleDiscoveryResult(
     validation: MultiplexerDiscoveryValidation,
   ): Promise<boolean> {
     if (validation.status === "usable") {
@@ -214,7 +210,7 @@ export class MultiplexerDaemonManager {
 
     try {
       await beforeSpawn();
-      await this.spawnDaemon();
+      this.spawnDaemon();
       await this.waitUntilReady(this.startupTimeout);
       return true;
     } finally {
@@ -222,7 +218,7 @@ export class MultiplexerDaemonManager {
     }
   }
 
-  async spawnDaemon(): Promise<void> {
+  private spawnDaemon(): void {
     const child = this.spawnProcess(
       process.execPath,
       [this.daemonEntry, ...this.createDaemonEntryArgs()],
@@ -236,7 +232,7 @@ export class MultiplexerDaemonManager {
     child.unref();
   }
 
-  async waitUntilReady(timeout: number): Promise<void> {
+  private async waitUntilReady(timeout: number): Promise<void> {
     const startedAt = this.now();
     let lastValidation: MultiplexerDiscoveryValidation | null = null;
     let lastHealthCheckFailure: string | null = null;
@@ -266,23 +262,29 @@ export class MultiplexerDaemonManager {
     );
   }
 
-  async tryGracefullyStopDaemon(
+  private async tryGracefullyStopDaemon(
     reason: MultiplexerDaemonReplaceReason,
   ): Promise<void> {
-    const daemonPid = await this.findDaemonProcessId();
-    const requested = await this.sendDaemonShutdownRpc(reason);
+    const daemonPids = await this.findDaemonProcessIds();
+    if (daemonPids.length > 1) {
+      await this.forceStopDaemon();
+      return;
+    }
 
-    if (daemonPid === -1) {
+    const requested = await this.sendDaemonShutdownRpc(reason);
+    const daemonPid = daemonPids[0];
+
+    if (daemonPid === undefined) {
       defaultLogger.error(
         `Failed to find multiplexer daemon process during trying graceful shutdown: ${this.daemonProcessName}`,
       );
-      return;
-    }
-    if (requested) {
-      await this.waitUntilProcessExits(daemonPid, this.replacementTimeout);
-    }
-    if (this.isProcessAlive(daemonPid)) {
-      await this.forceStopProcess(daemonPid);
+    } else {
+      if (requested) {
+        await this.waitUntilProcessExits(daemonPid, this.replacementTimeout);
+      }
+      if (this.isProcessAlive(daemonPid)) {
+        await this.forceStopProcess(daemonPid);
+      }
     }
     this.removeDaemonArtifacts();
   }
@@ -317,24 +319,26 @@ export class MultiplexerDaemonManager {
     if (!this.isProcessAlive(pid)) {
       return;
     }
-    if (sigkillError && (sigkillError as any)?.code !== "ESRCH") {
+    if (sigkillError) {
       throw asError(sigkillError);
     }
-    if (sigtermError && (sigtermError as any)?.code !== "ESRCH") {
+    if (sigtermError) {
       throw asError(sigtermError);
     }
     throw new Error(`Failed to stop multiplexer daemon ${pid}`);
   }
 
   private async forceStopDaemon(): Promise<void> {
-    const daemonPid = await this.findDaemonProcessId();
-    if (daemonPid !== -1 && this.isProcessAlive(daemonPid)) {
-      await this.forceStopProcess(daemonPid);
-    }
+    const daemonPids = await this.findDaemonProcessIds();
+    await Promise.all(
+      daemonPids
+        .filter((daemonPid) => this.isProcessAlive(daemonPid))
+        .map((daemonPid) => this.forceStopProcess(daemonPid)),
+    );
     this.removeDaemonArtifacts();
   }
 
-  private async findDaemonProcessId(): Promise<number> {
+  private async findDaemonProcessIds(): Promise<number[]> {
     let daemonProcessIds: number[];
     if (process.platform === "win32") {
       const processes = await findProcess(
@@ -365,7 +369,7 @@ export class MultiplexerDaemonManager {
         }: ${daemonProcessIds.join(", ")}`,
       );
     }
-    return daemonProcessIds.length === 0 ? -1 : daemonProcessIds[0];
+    return daemonProcessIds;
   }
 
   private tryKillProcess(pid: number, signal: NodeJS.Signals): unknown {
@@ -407,40 +411,12 @@ export class MultiplexerDaemonManager {
     return validation;
   }
 
-  private async forceRespawnDaemon(): Promise<void> {
-    // forceRespawnDaemon is intended for testing only and does not support
-    // concurrent use. Running multiple Connector facades with
-    // forceRespawnDaemon enabled at the same time may lead to undefined
-    // behavior and should be avoided.
-
-    while (!this.acquireSpawnLock()) {
-      await this.sleepFor(this.readyPollInterval);
-    }
-
-    try {
-      this.forceRespawnDaemonPending = false;
-      const validation = await this.probeDaemonHealthWithRetry();
-      if (
-        validation.status === "usable" ||
-        validation.status === "replace-required"
-      ) {
-        await this.tryGracefullyStopDaemon("force-respawn");
-      } else {
-        await this.forceStopDaemon();
-      }
-      await this.spawnDaemon();
-      return this.waitUntilReady(this.startupTimeout);
-    } finally {
-      this.releaseSpawnLock();
-    }
-  }
-
-  acquireSpawnLock(): boolean {
+  private acquireSpawnLock(): boolean {
     this.spawnLock.cleanupStale(this.spawnLockStaleTimeout, this.now());
     return this.spawnLock.acquire();
   }
 
-  releaseSpawnLock(): void {
+  private releaseSpawnLock(): void {
     this.spawnLock.release();
   }
 

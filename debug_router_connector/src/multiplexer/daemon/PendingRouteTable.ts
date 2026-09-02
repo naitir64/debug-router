@@ -49,10 +49,6 @@ export class PendingRouteTable {
     this.clearTimeoutFn = option.clearTimeout ?? clearTimeout;
   }
 
-  get size(): number {
-    return this.routes.size;
-  }
-
   add(
     input: Omit<PendingRoute, "globalMessageId" | "createdAt" | "timer">,
   ): PendingRoute {
@@ -68,19 +64,11 @@ export class PendingRouteTable {
     return route;
   }
 
-  has(globalMessageId: number): boolean {
-    return this.routes.has(globalMessageId);
-  }
-
   get(globalMessageId: number): PendingRoute | null {
     return this.routes.get(globalMessageId) ?? null;
   }
 
   take(globalMessageId: number): PendingRoute | null {
-    return this.remove(globalMessageId, true);
-  }
-
-  delete(globalMessageId: number): PendingRoute | null {
     return this.remove(globalMessageId, true);
   }
 
