@@ -18,32 +18,26 @@ import {
 import { ControlEvent } from "../protocol/event";
 import { MultiplexerControlTransport } from "../transport/MultiplexerControlTransport";
 import { MultiplexerControlConnection } from "./MultiplexerControlConnection";
+import type { MultiplexerDaemonHost } from "./MultiplexerDaemonHost";
 
-export type MultiplexerControlHost = {
-  isInUse: () => boolean;
-  handleControlRpc: (
-    controlId: number,
-    message: ControlRpcRequest,
-  ) => unknown | Promise<unknown>;
-  handleControlConnected?: (controlId: number) => void | Promise<void>;
-  handleControlDisconnected?: (controlId: number) => void | Promise<void>;
-};
+const DEFAULT_CONTROL_HANDSHAKE_TIMEOUT_MS = 1000;
 
 export type MultiplexerControlServerOption = {
-  host: MultiplexerControlHost;
+  host: MultiplexerDaemonHost;
   controlEndpoint: string;
   protocolVersion: number;
   debugInfo?: MultiplexerDebugInfo;
 
   // only used for testing or embedding
   now?: () => number;
+  handshakeTimeoutMs?: number;
 };
 
 export class MultiplexerControlServer {
   readonly controlEndpoint: string;
   readonly connections: Map<number, MultiplexerControlConnection> = new Map();
 
-  private readonly host: MultiplexerControlHost;
+  private readonly host: MultiplexerDaemonHost;
   private readonly option: MultiplexerControlServerOption;
   private readonly now: () => number;
   private readonly provisionalTransports = new Set<MultiplexerControlTransport>();
@@ -99,10 +93,11 @@ export class MultiplexerControlServer {
       closePromises.push(transport.end());
     }
     this.provisionalTransports.clear();
-    for (const connection of Array.from(this.connections.values())) {
+    const connections = Array.from(this.connections.values());
+    this.connections.clear();
+    for (const connection of connections) {
       closePromises.push(connection.close());
     }
-    this.connections.clear();
 
     await Promise.all([...closePromises, closeNetServer(server)]);
     if (process.platform !== "win32") {
@@ -120,6 +115,7 @@ export class MultiplexerControlServer {
         return;
       }
       receivedFirstMessage = true;
+      clearTimeout(handshakeTimer);
       unsubscribeMessage();
 
       if (isMultiplexerHealthRequest(message)) {
@@ -170,7 +166,26 @@ export class MultiplexerControlServer {
       }
     });
 
+    const handshakeTimer = setTimeout(() => {
+      unsubscribeMessage();
+
+      const response: MultiplexerHandshakeErrorResponse = {
+        kind: "handshake-error-response",
+        error: {
+          code: "control-handshake-timeout",
+          message: "Timed out waiting for the first control message",
+        },
+      };
+      if (transport.writable) {
+        transport.send(response);
+        void transport.end();
+      } else {
+        transport.destroy();
+      }
+    }, this.option.handshakeTimeoutMs ?? DEFAULT_CONTROL_HANDSHAKE_TIMEOUT_MS);
+
     transport.onClose(() => {
+      clearTimeout(handshakeTimer);
       unsubscribeMessage();
       this.provisionalTransports.delete(transport);
     });
@@ -200,14 +215,11 @@ export class MultiplexerControlServer {
     void this.host.handleControlDisconnected?.(controlId);
   }
 
-  async dispatchRpc(
+  private async dispatchRpc(
     controlId: number,
     message: ControlRpcRequest,
   ): Promise<void> {
-    const connection = this.connections.get(controlId);
-    if (!connection || connection.closed) {
-      return;
-    }
+    const connection = this.connections.get(controlId)!;
 
     try {
       const result = await this.host.handleControlRpc(controlId, message);

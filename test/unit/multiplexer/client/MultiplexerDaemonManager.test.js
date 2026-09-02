@@ -8,10 +8,17 @@ const { once } = require("events");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const rewire = require(require.resolve("rewire", {
+  paths: [path.join(__dirname, "../../../../debug_router_connector")],
+}));
 
-const {
-  MultiplexerDaemonManager,
-} = require("../../../../debug_router_connector/dist/cjs/src/multiplexer/client/MultiplexerDaemonManager");
+const managerModule = rewire(
+  path.join(
+    __dirname,
+    "../../../../debug_router_connector/dist/cjs/src/multiplexer/client/MultiplexerDaemonManager"
+  )
+);
+const { MultiplexerDaemonManager } = managerModule;
 const {
   FileLock,
 } = require("../../../../debug_router_connector/dist/cjs/src/multiplexer/utils/FileLock");
@@ -129,6 +136,7 @@ function createManager(tempDir, values, overrides = {}) {
     readyPollInterval: overrides.readyPollInterval ?? 10,
     replacementTimeout: overrides.replacementTimeout ?? 20,
     localProtocolVersion: 1,
+    enableDebugMode: overrides.enableDebugMode,
     debugInfo: overrides.debugInfo,
     legacyDriverDir: overrides.legacyDriverDir,
     enableWebSocket: overrides.enableWebSocket,
@@ -187,6 +195,26 @@ describe("MultiplexerDaemonManager", function () {
     assert.strictEqual(fs.existsSync(spawnLockPath), false);
   });
 
+  it("stops and respawns the daemon on every ensure in debug mode", async function () {
+    const stopReasons = [];
+    const { manager, discovery, spawnCalls } = createManager(
+      tempDir,
+      [usable(), usable(), usable(), usable()],
+      { enableDebugMode: true }
+    );
+    manager.tryGracefullyStopDaemon = async (reason) => {
+      stopReasons.push(reason);
+    };
+
+    await manager.ensureDaemon();
+    await manager.ensureDaemon();
+
+    assert.deepStrictEqual(stopReasons, ["force-stop", "force-stop"]);
+    assert.strictEqual(spawnCalls.length, 2);
+    assert.strictEqual(discovery.calls, 4);
+    assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
+  });
+
   it("[v1 compatibility gate] spawns once with the required daemon contract", async function () {
     let spawned = false;
     const controlEndpoint = path.join(tempDir, "control.sock");
@@ -219,10 +247,47 @@ describe("MultiplexerDaemonManager", function () {
     );
     assert.strictEqual(spawnCalls[0].options.argv0, manager.daemonProcessName);
     assert.strictEqual(spawnCalls[0].options.detached, true);
-    assert.strictEqual(spawnCalls[0].options.stdio, "ignore");
+    assert.deepStrictEqual(spawnCalls[0].options.stdio, [
+      "ignore",
+      "inherit",
+      "inherit",
+    ]);
     assert.strictEqual(spawnCalls[0].options.windowsHide, true);
     assert.strictEqual(spawnCalls[0].unref, true);
   });
+
+  for (const [runtime, versions, expectedRunAsNode] of [
+    ["Electron", { electron: "22.3.18" }, "1"],
+    ["Node", {}, "0"],
+  ]) {
+    it(`spawns the daemon with the correct runtime environment under ${runtime}`, function () {
+      const parentEnv = {
+        DEBUG_ROUTER_TEST_PARENT: "preserved",
+        ELECTRON_RUN_AS_NODE: "0",
+      };
+      const runtimeProcess = {
+        execPath: "/runtime/executable",
+        versions,
+        env: { ...parentEnv },
+      };
+      const restoreProcess = managerModule.__set__("process", runtimeProcess);
+      try {
+        const { manager, spawnCalls } = createManager(tempDir, []);
+        manager.spawnDaemon();
+
+        assert.strictEqual(spawnCalls.length, 1);
+        assert.strictEqual(spawnCalls[0].command, runtimeProcess.execPath);
+        assert.deepStrictEqual(
+          spawnCalls[0].options.env ?? runtimeProcess.env,
+          { ...parentEnv, ELECTRON_RUN_AS_NODE: expectedRunAsNode }
+        );
+        assert.deepStrictEqual(runtimeProcess.env, parentEnv);
+        assert.strictEqual(spawnCalls[0].unref, true);
+      } finally {
+        restoreProcess();
+      }
+    });
+  }
 
   it("[v1 compatibility gate] forwards optional daemon startup arguments", async function () {
     const debugInfo = { clientVersion: "1.2.3" };
@@ -245,7 +310,7 @@ describe("MultiplexerDaemonManager", function () {
       physicalConnectorOption,
     });
 
-    await manager.spawnDaemon();
+    manager.spawnDaemon();
 
     assert.strictEqual(spawnCalls.length, 1);
     const args = spawnCalls[0].args;
@@ -483,6 +548,57 @@ describe("MultiplexerDaemonManager", function () {
     assert.strictEqual(fs.existsSync(manager.spawnLock.lockPath), false);
   });
 
+  it("force-stops every daemon without RPC when multiple daemon pids are found", async function () {
+    const rpcCalls = [];
+    const stoppedPids = [];
+    const { manager, controlEndpoint } = createManager(tempDir, [usable()], {
+      isProcessAlive: () => true,
+    });
+    manager.findDaemonProcessIds = async () => [101, 202];
+    manager.forceStopProcess = async (pid) => stoppedPids.push(pid);
+    manager.setDaemonClient({
+      async call(method, params, ensureDaemon) {
+        rpcCalls.push([method, params, ensureDaemon]);
+        return {};
+      },
+    });
+    fs.writeFileSync(controlEndpoint, "stale");
+
+    await manager.tryGracefullyStopDaemon("force-stop");
+
+    assert.deepStrictEqual(rpcCalls, []);
+    assert.deepStrictEqual(stoppedPids, [101, 202]);
+    assert.strictEqual(fs.existsSync(controlEndpoint), false);
+  });
+
+  it("returns no daemon pids when Windows process lookup fails", async function () {
+    const lookupError = new Error("PowerShell lookup failed");
+    const errors = [];
+    const { manager } = createManager(tempDir, [usable()]);
+    const windowsProcess = Object.create(process);
+    Object.defineProperty(windowsProcess, "platform", { value: "win32" });
+    const restoreProcess = managerModule.__set__("process", windowsProcess);
+    const restoreFindProcess = managerModule.__set__("find_process_1", {
+      default: async () => {
+        throw lookupError;
+      },
+    });
+    const originalLoggerError = defaultLogger.error;
+    defaultLogger.error = (message) => errors.push(message);
+
+    try {
+      assert.deepStrictEqual(await manager.findDaemonProcessIds(), []);
+    } finally {
+      defaultLogger.error = originalLoggerError;
+      restoreFindProcess();
+      restoreProcess();
+    }
+
+    assert.deepStrictEqual(errors, [
+      `Failed to find multiplexer daemon process ${manager.daemonProcessName}: ${lookupError.message}`,
+    ]);
+  });
+
   it("finds and stops a Unix daemon by its argv0 marker", async function () {
     if (process.platform === "win32") this.skip();
     this.timeout(5000);
@@ -570,7 +686,7 @@ describe("MultiplexerDaemonManager", function () {
     }
   });
 
-  it("reports and returns when graceful shutdown cannot find a daemon pid", async function () {
+  it("reports and removes stale artifacts when graceful shutdown cannot find a daemon pid", async function () {
     const errors = [];
     const controlEndpoint = path.join(tempDir, "control.sock");
     const { manager } = createManager(tempDir, [usable()]);
@@ -595,6 +711,6 @@ describe("MultiplexerDaemonManager", function () {
     ]);
     assert.strictEqual(errors.length, 1);
     assert.ok(errors[0].includes(manager.daemonProcessName));
-    assert.strictEqual(fs.existsSync(controlEndpoint), true);
+    assert.strictEqual(fs.existsSync(controlEndpoint), false);
   });
 });

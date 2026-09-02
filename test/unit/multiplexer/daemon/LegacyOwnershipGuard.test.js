@@ -30,6 +30,7 @@ describe("LegacyOwnershipGuard", function () {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-owner-"));
     ownerDir = path.join(tempDir, "driver");
     lockDir = path.join(ownerDir, "lockfile");
+    fs.mkdirSync(ownerDir, { recursive: true });
     const fileLockImport = guardModule.__get__("file_lock_1");
     const originalDriverDir = fileLockImport.driver_dir;
     const originalLockDir = fileLockImport.lockDir;
@@ -55,13 +56,13 @@ describe("LegacyOwnershipGuard", function () {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("claims the legacy owner file and reports attached status", function () {
+  it("claims the legacy owner file and reports attached status", async function () {
     const changes = [];
     const guard = new LegacyOwnershipGuard({
       onStatusChanged: (change) => changes.push(change),
     });
 
-    assert.strictEqual(guard.reacquire(), true);
+    assert.strictEqual(await guard.reacquire(), true);
 
     assert.strictEqual(
       fs.readFileSync(path.join(ownerDir, "LatestDriverProcess"), "utf8"),
@@ -77,13 +78,14 @@ describe("LegacyOwnershipGuard", function () {
     ]);
   });
 
-  it("uses an explicit legacy driver dir instead of the daemon homedir default", function () {
+  it("uses an explicit legacy driver dir instead of the daemon homedir default", async function () {
     const explicitDriverDir = path.join(tempDir, "explicit-driver");
+    fs.mkdirSync(explicitDriverDir, { recursive: true });
     const guard = new LegacyOwnershipGuard({
       legacyDriverDir: explicitDriverDir,
     });
 
-    assert.strictEqual(guard.reacquire(), true);
+    assert.strictEqual(await guard.reacquire(), true);
 
     assert.strictEqual(
       fs.readFileSync(
@@ -98,11 +100,12 @@ describe("LegacyOwnershipGuard", function () {
     );
   });
 
-  it("clears stale legacy lock dirs before claiming the owner file", function () {
+  it("retries lock acquisition until the legacy lock holder releases", async function () {
     fs.mkdirSync(lockDir, { recursive: true });
     const guard = new LegacyOwnershipGuard();
+    setTimeout(() => fs.rmdirSync(lockDir), 20);
 
-    assert.strictEqual(guard.reacquire(), true);
+    assert.strictEqual(await guard.reacquire(), true);
 
     assert.strictEqual(
       fs.readFileSync(path.join(ownerDir, "LatestDriverProcess"), "utf8"),
@@ -111,12 +114,56 @@ describe("LegacyOwnershipGuard", function () {
     assert.strictEqual(fs.existsSync(lockDir), false);
   });
 
-  it("reports unattached when an alive legacy process owns the file", function () {
+  it("removes a legacy lock that remains held after all attempts", async function () {
+    fs.mkdirSync(lockDir, { recursive: true });
+    const guard = new LegacyOwnershipGuard();
+
+    assert.strictEqual(await guard.reacquire(), true);
+
+    assert.strictEqual(fs.existsSync(lockDir), false);
+    assert.strictEqual(
+      fs.readFileSync(path.join(ownerDir, "LatestDriverProcess"), "utf8"),
+      `${process.pid}`
+    );
+  });
+
+  it("does not start monitoring after being stopped while acquiring the lock", async function () {
+    fs.mkdirSync(lockDir, { recursive: true });
+    const guard = new LegacyOwnershipGuard();
+
+    const startPromise = guard.start();
+    guard.stop();
+    fs.rmdirSync(lockDir);
+    await startPromise;
+
+    assert.strictEqual(guard.stopped, true);
+    assert.strictEqual(guard.monitorTimer, undefined);
+  });
+
+  it("prepares the legacy driver dir when the guard starts", async function () {
+    const explicitDriverDir = path.join(tempDir, "start-driver");
+    const guard = new LegacyOwnershipGuard({
+      legacyDriverDir: explicitDriverDir,
+    });
+
+    await guard.start();
+    guard.stop();
+
+    assert.strictEqual(
+      fs.readFileSync(
+        path.join(explicitDriverDir, "LatestDriverProcess"),
+        "utf8"
+      ),
+      `${process.pid}`
+    );
+  });
+
+  it("reports unattached when an alive legacy process owns the file", async function () {
     const changes = [];
     const guard = new LegacyOwnershipGuard({
       onStatusChanged: (change) => changes.push(change),
     });
-    guard.reacquire();
+    await guard.reacquire();
     changes.length = 0;
     fs.writeFileSync(path.join(ownerDir, "LatestDriverProcess"), "90001");
     process.kill = (pid, signal) => {
@@ -126,7 +173,7 @@ describe("LegacyOwnershipGuard", function () {
     };
 
     guard.stopped = false;
-    guard.monitor();
+    await guard.monitor();
 
     assert.deepStrictEqual(changes, [
       {
@@ -138,7 +185,7 @@ describe("LegacyOwnershipGuard", function () {
     ]);
   });
 
-  it("reclaims stale and invalid owner files without reporting preemption", function () {
+  it("reclaims stale and invalid owner files without reporting preemption", async function () {
     const changes = [];
     const guard = new LegacyOwnershipGuard({
       onStatusChanged: (change) => changes.push(change),
@@ -152,9 +199,9 @@ describe("LegacyOwnershipGuard", function () {
     };
 
     guard.stopped = false;
-    guard.monitor();
+    await guard.monitor();
     fs.writeFileSync(path.join(ownerDir, "LatestDriverProcess"), "not-a-pid");
-    guard.monitor();
+    await guard.monitor();
 
     assert.deepStrictEqual(
       changes.map((change) => ({
@@ -181,17 +228,17 @@ describe("LegacyOwnershipGuard", function () {
     );
   });
 
-  it("disables ownership handling by silently attaching without touching the owner file", function () {
+  it("disables ownership handling by silently attaching without touching the owner file", async function () {
     const changes = [];
     process.env.DriverCloseMultiOpen = "true";
     const guard = new LegacyOwnershipGuard({
       onStatusChanged: (change) => changes.push(change),
     });
 
-    assert.strictEqual(guard.reacquire(), true);
+    assert.strictEqual(await guard.reacquire(), true);
     assert.strictEqual(guard.currentStatus, "unInit");
-    guard.start();
-    assert.strictEqual(guard.reacquire(), true);
+    await guard.start();
+    assert.strictEqual(await guard.reacquire(), true);
 
     assert.strictEqual(guard.currentStatus, "attached");
     assert.deepStrictEqual(changes, []);

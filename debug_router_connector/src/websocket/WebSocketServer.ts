@@ -213,12 +213,6 @@ export class WebSocketController {
     });
   }
 
-  sendDeviceList() {
-    this.webClients.forEach((client) => {
-      client.handleListClients();
-    });
-  }
-
   getAllUsbClients(): UsbClient[] {
     return this.controllerHost.getAllUsbClients();
   }

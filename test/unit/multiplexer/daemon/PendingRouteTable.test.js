@@ -87,8 +87,6 @@ describe("PendingRouteTable", function () {
 
     assert.strictEqual(route.createdAt, 100);
     assert.strictEqual(route.globalMessageId, 1);
-    assert.strictEqual(table.size, 1);
-    assert.strictEqual(table.has(1), true);
     assert.strictEqual(table.get(1), route);
     assert.strictEqual(timers.timers.length, 1);
     assert.strictEqual(
@@ -98,7 +96,6 @@ describe("PendingRouteTable", function () {
 
     now = 200;
     assert.strictEqual(table.take(1), route);
-    assert.strictEqual(table.size, 0);
     assert.strictEqual(table.get(1), null);
     assert.strictEqual(timers.timers[0].cleared, true);
     timers.run(timers.timers[0]);
@@ -129,9 +126,9 @@ describe("PendingRouteTable", function () {
       createdAt: 500,
       timer: timers.timers[0],
     });
-    assert.strictEqual(table.delete(1), route);
+    assert.strictEqual(table.take(1), route);
     assert.strictEqual(timers.timers[0].cleared, true);
-    assert.strictEqual(table.delete(1), null);
+    assert.strictEqual(table.take(1), null);
   });
 
   it("clears only the matching control routes and clears their timers", function () {
@@ -166,7 +163,6 @@ describe("PendingRouteTable", function () {
     });
 
     assert.deepStrictEqual(table.clearByControlId(9), [first, third]);
-    assert.strictEqual(table.size, 2);
     assert.strictEqual(table.get(1), null);
     assert.strictEqual(table.get(2), second);
     assert.strictEqual(table.get(3), null);
@@ -209,7 +205,6 @@ describe("PendingRouteTable", function () {
     });
 
     assert.deepStrictEqual(table.clearByWebClientId(30), [firstWeb, secondWeb]);
-    assert.strictEqual(table.size, 2);
     assert.strictEqual(table.get(1), control);
     assert.strictEqual(table.get(2), null);
     assert.strictEqual(table.get(3).requesterId, 31);
@@ -242,7 +237,6 @@ describe("PendingRouteTable", function () {
     });
 
     assert.deepStrictEqual(table.clearByClientId(50), [control, websocket]);
-    assert.strictEqual(table.size, 1);
     assert.strictEqual(table.get(3), other);
     assert.strictEqual(timers.timers[0].cleared, true);
     assert.strictEqual(timers.timers[1].cleared, true);
@@ -269,7 +263,8 @@ describe("PendingRouteTable", function () {
     });
 
     assert.deepStrictEqual(table.clear(), [first, second]);
-    assert.strictEqual(table.size, 0);
+    assert.strictEqual(table.get(first.globalMessageId), null);
+    assert.strictEqual(table.get(second.globalMessageId), null);
     assert.strictEqual(
       timers.timers.every((timer) => timer.cleared),
       true
@@ -305,7 +300,8 @@ describe("PendingRouteTable", function () {
     timers.run(timers.timers[1]);
     timers.run(timers.timers[0]);
 
-    assert.strictEqual(table.size, 0);
+    assert.strictEqual(table.get(control.globalMessageId), null);
+    assert.strictEqual(table.get(web.globalMessageId), null);
     assert.deepStrictEqual(timeoutRoutes, [control, web]);
     assert.strictEqual(rejected.length, 1);
     assert.match(

@@ -80,6 +80,9 @@ describe("MultiplexerDaemonClient", function () {
       controlEndpoint: endpoint,
       async ensureDaemon() {
         ensureCalls++;
+        if (option.ensureDaemon) {
+          return option.ensureDaemon();
+        }
         return {
           kind: "health-response",
           ok: true,
@@ -90,7 +93,10 @@ describe("MultiplexerDaemonClient", function () {
       setDaemonClient(value) {
         this.client = value;
       },
-      async stopDaemonForDebugging() {},
+      stopCalls: [],
+      async stopDaemonForDebugging(withRespawn = false) {
+        this.stopCalls.push(withRespawn);
+      },
     };
     client = new MultiplexerDaemonClient({
       daemonManager: manager,
@@ -110,9 +116,33 @@ describe("MultiplexerDaemonClient", function () {
     await client.connect();
     await new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(ensureCalls, 1);
-    assert.strictEqual(client.ready, true);
+    assert.strictEqual(client.status, "connected");
     assert.deepStrictEqual(connectedIds, [1]);
     assert.strictEqual(events[0].event, "snapshot");
+  });
+
+  it("exposes the connection lifecycle through status", async function () {
+    let resolveEnsure;
+    const ensure = new Promise((resolve) => {
+      resolveEnsure = resolve;
+    });
+    await start({ ensureDaemon: () => ensure });
+
+    assert.strictEqual(client.status, "disconnected");
+    const connecting = client.connect();
+    assert.strictEqual(client.status, "connecting");
+
+    resolveEnsure({
+      kind: "health-response",
+      ok: true,
+      protocolVersion: 1,
+      isInUse: false,
+    });
+    await connecting;
+    assert.strictEqual(client.status, "connected");
+
+    await client.close();
+    assert.strictEqual(client.status, "disconnected");
   });
 
   it("sends framed RPCs and resolves method-aware responses", async function () {
@@ -134,23 +164,31 @@ describe("MultiplexerDaemonClient", function () {
       /Invalid multiplexer RPC startDeviceClientWatcher params/
     );
     assert.strictEqual(ensureCalls, 0);
-    assert.strictEqual(client.ready, false);
+    assert.strictEqual(client.status, "disconnected");
   });
 
   it("uses direct Register/RPC for graceful shutdown without ensure", async function () {
     await start();
     await client.call("shutdownDaemon", { reason: "test" }, false);
     assert.strictEqual(ensureCalls, 0);
-    assert.strictEqual(client.ready, true);
+    assert.strictEqual(client.status, "connected");
   });
 
-  it("reuses a ready connection for direct daemon RPCs", async function () {
+  it("reuses a connected client for direct daemon RPCs", async function () {
     await start();
     await client.connect();
     await client.call("shutdownDaemon", { reason: "test" }, false);
     assert.strictEqual(ensureCalls, 1);
     assert.deepStrictEqual(connectedIds, [1]);
-    assert.strictEqual(client.ready, true);
+    assert.strictEqual(client.status, "connected");
+  });
+
+  it("stops the daemon for debugging without respawning it", async function () {
+    const { manager } = await start();
+
+    await client.forceStopDaemon();
+
+    assert.deepStrictEqual(manager.stopCalls, [false]);
   });
 
   it("rejects daemon RPC errors and invalid successful results", async function () {
@@ -206,26 +244,27 @@ describe("MultiplexerDaemonClient", function () {
       controlEndpoint: endpoint,
       async ensureDaemon() {},
       setDaemonClient() {},
-      async stopDaemonForDebugging() {},
+      async stopDaemonForDebugging(_withRespawn = false) {},
     };
     client = new MultiplexerDaemonClient({
       daemonManager: manager,
       controlEndpoint: endpoint,
     });
     await assert.rejects(() => client.connect(), /register response/);
+    assert.strictEqual(client.status, "disconnected");
     await new Promise((resolve) => rawServer.close(resolve));
   });
 
-  it("emits connection state only after Register succeeds", async function () {
+  it("emits connection events only after Register succeeds", async function () {
     await start();
     const states = [];
-    client.subscribeConnectionState((state) => states.push(state.state));
+    client.subscribeConnectionEvent((event) => states.push(event.state));
     await client.connect();
     await client.close();
     assert.deepStrictEqual(states, ["connected", "disconnected"]);
   });
 
-  it("keeps only the latest event and connection state listeners", async function () {
+  it("keeps only the latest host and connection event listeners", async function () {
     await start();
     const firstEvents = [];
     const secondEvents = [];
@@ -233,8 +272,8 @@ describe("MultiplexerDaemonClient", function () {
     const secondStates = [];
     client.subscribe((event) => firstEvents.push(event));
     client.subscribe((event) => secondEvents.push(event));
-    client.subscribeConnectionState((state) => firstStates.push(state.state));
-    client.subscribeConnectionState((state) => secondStates.push(state.state));
+    client.subscribeConnectionEvent((event) => firstStates.push(event.state));
+    client.subscribeConnectionEvent((event) => secondStates.push(event.state));
 
     await client.connect();
     await client.close();

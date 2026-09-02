@@ -99,19 +99,7 @@ export class MultiplexerUsbClient extends Client {
       ) {
         throw new Error("Invalid Customized response type");
       }
-
-      const responseMessage = (response as any)?.data?.data?.message;
-      if (typeof responseMessage === "string") {
-        return responseMessage;
-      }
-      if (responseMessage !== undefined) {
-        const serialized = JSON.stringify(responseMessage);
-        if (serialized !== undefined) {
-          return serialized;
-        }
-      }
-
-      throw new Error("Invalid Customized response message");
+      return (response as any)?.data?.data?.message;
     });
   }
 
