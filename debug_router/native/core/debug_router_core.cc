@@ -18,6 +18,9 @@
 #include "debug_router/native/net/websocket_client.h"
 #include "debug_router/native/processor/message_handler.h"
 #include "debug_router/native/processor/processor.h"
+#if defined(DEBUGROUTER_ENABLE_IOS_USB_START_PORT)
+#include "debug_router/native/socket/socket_server_type.h"
+#endif
 #include "debug_router/native/thread/debug_router_executor.h"
 #include "json/value.h"
 
@@ -39,15 +42,24 @@ class MessageHandlerCore : public processor::MessageHandler {
 
   std::unordered_map<int, std::string> GetSessionList() override {
     std::unordered_map<int, std::string> session_list;
-    std::shared_lock lock(DebugRouterCore::GetInstance().slots_mutex_);
-    const auto &slots = DebugRouterCore::GetInstance().slots_;
-    if (!slots.empty()) {
-      for (auto it = slots.begin(); it != slots.end(); ++it) {
-        Json::Value session_info;
-        session_info["type"] = it->second->GetType();
-        session_info["url"] = it->second->GetUrl();
-        session_list[it->first] = session_info.toStyledString();
+    auto &core = DebugRouterCore::GetInstance();
+    const bool enable_all_sessions =
+        core.enable_all_sessions_.load(std::memory_order_relaxed);
+    std::unordered_set<int32_t> enabled_session_ids;
+    if (!enable_all_sessions) {
+      std::shared_lock lock(core.enabled_sessions_mutex_);
+      enabled_session_ids = core.enabled_session_ids_;
+    }
+
+    std::shared_lock lock(core.slots_mutex_);
+    for (const auto &slot : core.slots_) {
+      if (!enable_all_sessions && enabled_session_ids.count(slot.first) == 0) {
+        continue;
       }
+      Json::Value session_info;
+      session_info["type"] = slot.second->GetType();
+      session_info["url"] = slot.second->GetUrl();
+      session_list[slot.first] = session_info.toStyledString();
     }
     return session_list;
   }
@@ -175,8 +187,13 @@ DebugRouterCore::DebugRouterCore()
   size_t transceiver_count = 0;
   message_transceivers_[transceiver_count++] =
       std::make_shared<net::WebSocketClient>();
+#if defined(DEBUGROUTER_ENABLE_IOS_USB_START_PORT)
+  socket_server_client_ = std::make_shared<net::SocketServerClient>();
+  message_transceivers_[transceiver_count++] = socket_server_client_;
+#else
   message_transceivers_[transceiver_count++] =
       std::make_shared<net::SocketServerClient>();
+#endif
 #endif
   for (size_t i = 0; i < kTransceiverCount; ++i) {
     message_transceivers_[i]->Init();
@@ -345,6 +362,39 @@ int32_t DebugRouterCore::Plug(const std::shared_ptr<core::NativeSlot> &slot) {
 int32_t DebugRouterCore::GetUSBPort() {
   return usb_port_.load(std::memory_order_relaxed);
 }
+
+#if defined(DEBUGROUTER_ENABLE_IOS_USB_START_PORT)
+bool DebugRouterCore::SetUSBStartPort(int32_t start_port) {
+  if (start_port <= 0 ||
+      start_port > UINT16_MAX - socket_server::kTryPortCount + 1) {
+    LOGW("SetUSBStartPort ignored invalid start port: " << start_port);
+    return false;
+  }
+  LOGI("SetUSBStartPort: " << start_port);
+  if (!socket_server_client_) {
+    LOGW("SetUSBStartPort ignored because usb server is unavailable.");
+    return false;
+  }
+  if (server_running_.load(std::memory_order_relaxed)) {
+    thread::DebugRouterExecutor::GetInstance().Post([this, start_port]() {
+      const bool should_run = ShouldServerRun();
+      if (current_transceiver_ != nullptr &&
+          current_transceiver_->GetType() == ConnectionType::kUsb) {
+        current_transceiver_->Disconnect();
+      }
+      usb_port_.store(socket_server::kInvalidPort, std::memory_order_relaxed);
+      socket_server_client_->StopServer();
+      socket_server_client_->SetStartPort(start_port);
+      if (should_run) {
+        socket_server_client_->StartServer();
+      }
+    });
+  } else {
+    socket_server_client_->SetStartPort(start_port);
+  }
+  return true;
+}
+#endif
 
 void DebugRouterCore::Pull(int32_t session_id_) {
   LOGI("pull session: " << session_id_);
@@ -868,9 +918,17 @@ void DebugRouterCore::EnableSingleSession(int32_t session_id) {
     return;
   }
   LOGI("enableSingleSession: " << session_id);
+  bool newly_enabled = false;
   {
     std::unique_lock lock(enabled_sessions_mutex_);
-    enabled_session_ids_.insert(session_id);
+    newly_enabled = enabled_session_ids_.insert(session_id).second;
+  }
+  // Visibility only flips here in single-session mode: Plug()'s flush runs
+  // before enable and GetSessionList() filters out not-yet-enabled ids.
+  // Push the list when connected, mirroring Pull()'s flush on removal.
+  if (newly_enabled &&
+      connection_state_.load(std::memory_order_relaxed) == CONNECTED) {
+    processor_->FlushSessionList();
   }
 }
 

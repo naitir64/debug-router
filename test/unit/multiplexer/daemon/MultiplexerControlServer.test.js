@@ -39,6 +39,16 @@ async function connectTransport(endpoint) {
   return transport;
 }
 
+async function waitForProvisionalTransportsToBeRemoved(server) {
+  const deadline = Date.now() + 500;
+  while (server.provisionalTransports.size !== 0) {
+    if (Date.now() >= deadline) {
+      throw new Error("provisional control transport cleanup timeout");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe("MultiplexerControlServer", function () {
   let tempDir;
   let endpoint;
@@ -47,6 +57,7 @@ describe("MultiplexerControlServer", function () {
   let disconnected;
   let rpcCalls;
   let daemonInUse;
+  let host;
 
   beforeEach(function () {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "debug-router-server-"));
@@ -55,29 +66,30 @@ describe("MultiplexerControlServer", function () {
     disconnected = [];
     rpcCalls = [];
     daemonInUse = false;
+    host = {
+      isInUse() {
+        return daemonInUse;
+      },
+      handleControlConnected(id) {
+        connected.push(id);
+      },
+      handleControlDisconnected(id) {
+        disconnected.push(id);
+      },
+      handleControlRpc(id, message) {
+        rpcCalls.push([id, message]);
+        if (message.method === "startWSServer") {
+          return { port: 19783, host: "127.0.0.1" };
+        }
+        return undefined;
+      },
+    };
     server = new MultiplexerControlServer({
       controlEndpoint: endpoint,
       protocolVersion: 2,
       debugInfo: { daemonVersion: "test" },
       now: () => 1234,
-      host: {
-        isInUse() {
-          return daemonInUse;
-        },
-        handleControlConnected(id) {
-          connected.push(id);
-        },
-        handleControlDisconnected(id) {
-          disconnected.push(id);
-        },
-        handleControlRpc(id, message) {
-          rpcCalls.push([id, message]);
-          if (message.method === "startWSServer") {
-            return { port: 19783, host: "127.0.0.1" };
-          }
-          return undefined;
-        },
-      },
+      host,
     });
   });
 
@@ -113,6 +125,7 @@ describe("MultiplexerControlServer", function () {
     await server.start();
     const transport = await connectTransport(endpoint);
     const responsePromise = waitForMessage(transport);
+    const closed = new Promise((resolve) => transport.onClose(resolve));
     transport.send({ kind: "health", debugInfo: "invalid" });
     assert.deepStrictEqual(await responsePromise, {
       kind: "handshake-error-response",
@@ -122,8 +135,11 @@ describe("MultiplexerControlServer", function () {
           "First control message must be a valid health or register request",
       },
     });
+    await closed;
+    await waitForProvisionalTransportsToBeRemoved(server);
     assert.deepStrictEqual(connected, []);
     assert.strictEqual(server.connections.size, 0);
+    assert.strictEqual(server.provisionalTransports.size, 0);
   });
 
   it("reports whether the daemon has an active consumer", async function () {
@@ -177,13 +193,17 @@ describe("MultiplexerControlServer", function () {
     try {
       await server.start();
       const transport = await connectTransport(endpoint);
+      const closed = new Promise((resolve) => transport.onClose(resolve));
       transport.send({ kind: "register" });
       await registerResponseSendAttempted;
+      await closed;
+      await waitForProvisionalTransportsToBeRemoved(server);
 
       assert.strictEqual(registerCalls, 0);
       assert.deepStrictEqual(connected, []);
       assert.deepStrictEqual(disconnected, []);
       assert.strictEqual(server.connections.size, 0);
+      assert.strictEqual(server.provisionalTransports.size, 0);
     } finally {
       MultiplexerControlTransport.prototype.send = originalSend;
       server.registerConnection = originalRegisterConnection;
@@ -219,7 +239,62 @@ describe("MultiplexerControlServer", function () {
     const closed = new Promise((resolve) => transport.onClose(resolve));
     transport.send({ kind: "rpc", id: 1, method: "startWSServer", params: {} });
     await closed;
+    await waitForProvisionalTransportsToBeRemoved(server);
     assert.deepStrictEqual(connected, []);
+    assert.strictEqual(server.provisionalTransports.size, 0);
+  });
+
+  it("returns a handshake timeout error when no first message is received", async function () {
+    server = new MultiplexerControlServer({
+      controlEndpoint: endpoint,
+      protocolVersion: 2,
+      handshakeTimeoutMs: 20,
+      host,
+    });
+    await server.start();
+    const transport = await connectTransport(endpoint);
+    const responsePromise = waitForMessage(transport);
+    const closed = new Promise((resolve) => transport.onClose(resolve));
+
+    assert.deepStrictEqual(await responsePromise, {
+      kind: "handshake-error-response",
+      error: {
+        code: "control-handshake-timeout",
+        message: "Timed out waiting for the first control message",
+      },
+    });
+    await closed;
+    await waitForProvisionalTransportsToBeRemoved(server);
+    assert.deepStrictEqual(connected, []);
+    assert.strictEqual(server.connections.size, 0);
+    assert.strictEqual(server.provisionalTransports.size, 0);
+  });
+
+  it("cancels the handshake timeout after receiving Register", async function () {
+    server = new MultiplexerControlServer({
+      controlEndpoint: endpoint,
+      protocolVersion: 2,
+      handshakeTimeoutMs: 20,
+      host,
+    });
+    await server.start();
+    const transport = await connectTransport(endpoint);
+    const responsePromise = waitForMessage(transport);
+    let closed = false;
+    transport.onClose(() => {
+      closed = true;
+    });
+
+    transport.send({ kind: "register" });
+    assert.deepStrictEqual(await responsePromise, {
+      kind: "register-response",
+      ok: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.strictEqual(closed, false);
+    assert.strictEqual(server.connections.size, 1);
+    transport.destroy();
   });
 
   it("is idempotent and removes the Unix socket on stop", async function () {

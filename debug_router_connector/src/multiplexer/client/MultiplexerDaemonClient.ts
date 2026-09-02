@@ -46,9 +46,14 @@ type PendingRpc = {
   timer: NodeJS.Timeout;
 };
 
-export type MultiplexerDaemonConnectionState =
+export type MultiplexerDaemonConnectionEvent =
   | { state: "connected" }
   | { state: "disconnected"; error: Error };
+
+type MultiplexerDaemonClientStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected";
 
 export class MultiplexerDaemonClient {
   readonly pendingRpc: Map<number, PendingRpc> = new Map();
@@ -58,15 +63,15 @@ export class MultiplexerDaemonClient {
   private readonly debugInfo?: MultiplexerDebugInfo;
   private readonly now: () => number;
   private eventListener?: (event: ControlEvent) => void;
-  private connectionStateListener?: (
-    state: MultiplexerDaemonConnectionState,
+  private connectionEventListener?: (
+    event: MultiplexerDaemonConnectionEvent,
   ) => void;
   private controlTransport: MultiplexerControlTransport | null = null;
   private unsubscribeTransportMessage: (() => void) | undefined;
   private unsubscribeTransportClose: (() => void) | undefined;
   private nextRpcId = 1;
-  private connecting: Promise<void> | null = null;
-  private registered = false;
+  private connectPromise: Promise<void> | null = null;
+  private status: MultiplexerDaemonClientStatus = "disconnected";
 
   constructor(option: MultiplexerDaemonClientOption) {
     this.daemonManager = option.daemonManager;
@@ -83,14 +88,6 @@ export class MultiplexerDaemonClient {
     this.daemonManager.setDaemonClient(this);
   }
 
-  get ready(): boolean {
-    return (
-      this.registered &&
-      !!this.controlTransport &&
-      this.controlTransport.writable
-    );
-  }
-
   async call<M extends ControlRpcMethod>(
     method: M,
     params: ControlRpcParams[M],
@@ -99,7 +96,7 @@ export class MultiplexerDaemonClient {
     this.assertValidRpcParams(method, params);
     if (ensureDaemon) {
       await this.connect();
-    } else if (!this.ready) {
+    } else if (this.status !== "connected") {
       await this.connectInternal(false);
     }
     return this.sendRpc(method, params);
@@ -115,27 +112,27 @@ export class MultiplexerDaemonClient {
   }
 
   async connect(): Promise<void> {
-    if (this.ready) {
+    if (this.status === "connected") {
       return;
     }
-    if (this.connecting) {
-      return this.connecting;
+    if (this.connectPromise) {
+      return this.connectPromise;
     }
 
-    this.connecting = this.connectInternal(true).finally(() => {
-      this.connecting = null;
+    this.connectPromise = this.connectInternal(true).finally(() => {
+      this.connectPromise = null;
     });
-    return this.connecting;
+    return this.connectPromise;
   }
 
   private sendRpc<M extends ControlRpcMethod>(
     method: M,
     params: ControlRpcParams[M],
   ): Promise<ControlRpcResult[M]> {
-    const transport = this.controlTransport;
-    if (!transport || !this.ready) {
+    if (this.status !== "connected") {
       throw new Error("Multiplexer control socket is not connected");
     }
+    const transport = this.controlTransport!;
 
     const id = this.createRpcId();
     const debugInfo = this.createDebugInfo();
@@ -181,17 +178,17 @@ export class MultiplexerDaemonClient {
     };
   }
 
-  subscribeConnectionState(
-    listener: (state: MultiplexerDaemonConnectionState) => void,
+  subscribeConnectionEvent(
+    listener: (event: MultiplexerDaemonConnectionEvent) => void,
   ): () => void {
-    this.connectionStateListener = listener;
+    this.connectionEventListener = listener;
     return () => {
-      this.connectionStateListener = undefined;
+      this.connectionEventListener = undefined;
     };
   }
 
-  private emitConnectionState(state: MultiplexerDaemonConnectionState): void {
-    this.connectionStateListener?.(state);
+  private emitConnectionEvent(event: MultiplexerDaemonConnectionEvent): void {
+    this.connectionEventListener?.(event);
   }
 
   async forceStopDaemon(): Promise<void> {
@@ -213,15 +210,26 @@ export class MultiplexerDaemonClient {
         false,
       );
     }
+    this.status = "connecting";
     if (ensureDaemon) {
-      await this.daemonManager.ensureDaemon();
+      try {
+        await this.daemonManager.ensureDaemon();
+      } catch (error) {
+        this.status = "disconnected";
+        throw error;
+      }
     }
 
-    const transport = new MultiplexerControlTransport(
-      createConnection(this.controlEndpoint),
-    );
+    let transport: MultiplexerControlTransport;
+    try {
+      transport = new MultiplexerControlTransport(
+        createConnection(this.controlEndpoint),
+      );
+    } catch (error) {
+      this.status = "disconnected";
+      throw error;
+    }
     this.controlTransport = transport;
-    this.registered = false;
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -239,6 +247,7 @@ export class MultiplexerDaemonClient {
         if (this.controlTransport === transport) {
           this.controlTransport = null;
         }
+        this.status = "disconnected";
         transport.destroy(error);
         reject(error);
       };
@@ -266,14 +275,14 @@ export class MultiplexerDaemonClient {
 
         settled = true;
         cleanupHandshake();
-        this.registered = true;
         this.unsubscribeTransportMessage = transport.onMessage(
           this.handleTransportMessage,
         );
         this.unsubscribeTransportClose = transport.onClose(
           this.handleTransportClose,
         );
-        this.emitConnectionState({ state: "connected" });
+        this.status = "connected";
+        this.emitConnectionEvent({ state: "connected" });
         resolve();
       });
       const unsubscribeClose = transport.onClose((error) => {
@@ -337,7 +346,7 @@ export class MultiplexerDaemonClient {
   async close(): Promise<void> {
     await this.closeSocket(new Error("Multiplexer remote client closed"));
     this.eventListener = undefined;
-    this.connectionStateListener = undefined;
+    this.connectionEventListener = undefined;
   }
 
   private async closeSocket(
@@ -346,9 +355,9 @@ export class MultiplexerDaemonClient {
   ): Promise<void> {
     const transport = this.controlTransport;
     this.controlTransport = null;
-    this.registered = false;
+    this.status = "disconnected";
     if (clearConnecting) {
-      this.connecting = null;
+      this.connectPromise = null;
     }
     this.unsubscribeTransportMessage?.();
     this.unsubscribeTransportClose?.();
@@ -359,7 +368,7 @@ export class MultiplexerDaemonClient {
     if (!transport) {
       return;
     }
-    this.emitConnectionState({ state: "disconnected", error });
+    this.emitConnectionEvent({ state: "disconnected", error });
     await transport.end();
   }
 

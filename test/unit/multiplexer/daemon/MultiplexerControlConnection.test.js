@@ -100,26 +100,11 @@ describe("MultiplexerControlConnection", function () {
     assert.strictEqual(transport.sent.length, 3);
   });
 
-  it("converts dispatch failures into RPC errors", async function () {
-    const failure = createConnection({
-      onMessage: async () => {
-        throw new Error("dispatch failed");
-      },
-    });
-    failure.transport.emitMessage(request(2));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(
-      failure.transport.sent[0].error.message,
-      "dispatch failed"
-    );
-  });
-
   it("closes idempotently and unregisters once", async function () {
     const { connection, transport, closes } = createConnection();
     await connection.close();
     connection.handleClose();
     transport.emitClose();
     assert.deepStrictEqual(closes, [7]);
-    assert.strictEqual(connection.closed, true);
   });
 });

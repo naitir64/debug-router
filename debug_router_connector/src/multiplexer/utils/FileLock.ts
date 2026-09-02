@@ -9,38 +9,30 @@ import { randomBytes } from "crypto";
 const FILE_LOCK_REMOVE_MAX_RETRIES = 3;
 const FILE_LOCK_REMOVE_RETRY_DELAY_MS = 10;
 
-export type FileLockOwner = {
+type FileLockOwner = {
   pid: number;
   createdAt: number;
   token: string; // with pid, createdAt and random bytes, used to identify the owner of the lock.
 };
 
-export type FileLockTokenFactory = (
-  owner: Pick<FileLockOwner, "pid" | "createdAt">,
-) => string;
-
 export class FileLock {
   private locked = false;
   private owner: FileLockOwner | null = null;
-  readonly lockPath: string;
-  private readonly tokenFactory: FileLockTokenFactory;
-  // used to generate tokens for the lock owners.
-  // can be overridden to use custom token generation logic for testing or debugging purposes.
+  private readonly lockPath: string;
 
-  constructor(
-    lockPath: string,
-    tokenFactory: FileLockTokenFactory = createDefaultToken,
-  ) {
+  constructor(lockPath: string) {
     this.lockPath = lockPath;
-    this.tokenFactory = tokenFactory;
   }
 
   acquire(): boolean {
     if (this.locked) {
-      return true;
+      if (this.owner && isSameOwner(this.readOwner(), this.owner)) {
+        return true;
+      }
+      this.clearLocalState();
     }
 
-    const owner = createOwner(this.tokenFactory);
+    const owner = createOwner();
     try {
       fs.mkdirSync(path.dirname(this.lockPath), { recursive: true });
       fs.mkdirSync(this.lockPath);
@@ -57,6 +49,11 @@ export class FileLock {
     }
   }
 
+  /**
+   * Best-effort release. If another valid owner has taken over, local
+   * ownership is cleared without removing the replacement lock. If the same
+   * owner remains after a removal failure, an error is thrown.
+   */
   release(): void {
     if (!this.locked) {
       return;
@@ -68,19 +65,20 @@ export class FileLock {
       return;
     }
 
-    const removed = this.tryRemove(owner);
-
-    // If the lock now belongs to another owner, this instance no longer owns it locally either.
-    if (removed || !isSameOwner(this.readOwner(), owner)) {
+    if (this.tryRemove(owner)) {
       this.clearLocalState();
+      return;
     }
+
+    if (!isSameOwner(this.readOwner(), owner)) {
+      this.clearLocalState();
+      return;
+    }
+
+    throw new Error(`Failed to release file lock: ${this.lockPath}`);
   }
 
-  isLocked(): boolean {
-    return this.locked;
-  }
-
-  readOwner(): FileLockOwner | null {
+  private readOwner(): FileLockOwner | null {
     const ownerPath = this.getOwnerPath();
     if (!fs.existsSync(ownerPath)) {
       return null;
@@ -89,11 +87,12 @@ export class FileLock {
     try {
       const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
       if (
-        typeof owner?.pid === "number" &&
-        Number.isFinite(owner.pid) &&
-        typeof owner?.createdAt === "number" &&
-        Number.isFinite(owner.createdAt) &&
-        typeof owner?.token === "string"
+        Number.isSafeInteger(owner?.pid) &&
+        owner.pid > 0 &&
+        Number.isSafeInteger(owner?.createdAt) &&
+        owner.createdAt > 0 &&
+        typeof owner?.token === "string" &&
+        owner.token.length > 0
       ) {
         return {
           pid: owner.pid,
@@ -106,11 +105,6 @@ export class FileLock {
     }
 
     return null;
-  }
-
-  isLockOwnerAlive(): boolean {
-    const owner = this.readOwner();
-    return owner ? isProcessAlive(owner.pid) : false;
   }
 
   private isLockStateStale(
@@ -129,13 +123,7 @@ export class FileLock {
       return now - owner.createdAt > timeout;
     }
 
-    // use lock mtime to check when owner.createdAt not exists.
-    return now - this.getLockMtimeMs() > timeout;
-  }
-
-  cleanup(): boolean {
-    const lastOwner = this.readOwner();
-    return this.tryRemove(lastOwner);
+    return true;
   }
 
   cleanupStale(timeout: number, now: number = Date.now()): boolean {
@@ -147,7 +135,7 @@ export class FileLock {
     return this.tryRemove(staleOwner);
   }
 
-  tryRemove(expectedOwner: FileLockOwner | null): boolean {
+  private tryRemove(expectedOwner: FileLockOwner | null): boolean {
     try {
       if (!fs.existsSync(this.lockPath)) {
         return true;
@@ -174,23 +162,11 @@ export class FileLock {
   }
 
   private writeOwner(owner: FileLockOwner): void {
-    fs.writeFileSync(this.getOwnerPath(), JSON.stringify(owner, null, 2));
+    fs.writeFileSync(this.getOwnerPath(), JSON.stringify(owner));
   }
 
   private getOwnerPath(): string {
     return path.join(this.lockPath, "owner.json");
-  }
-
-  private getLockMtimeMs(): number {
-    try {
-      return fs.statSync(this.lockPath).mtimeMs;
-    } catch (error: any) {
-      if (error?.code === "ENOENT") {
-        return Date.now();
-      }
-
-      throw error;
-    }
   }
 
   private clearLocalState(): void {
@@ -199,13 +175,13 @@ export class FileLock {
   }
 }
 
-function createOwner(tokenFactory: FileLockTokenFactory): FileLockOwner {
+function createOwner(): FileLockOwner {
   const pid = process.pid;
   const createdAt = Date.now();
   return {
     pid,
     createdAt,
-    token: tokenFactory({
+    token: createDefaultToken({
       pid,
       createdAt,
     }),

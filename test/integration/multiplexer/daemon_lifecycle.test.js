@@ -84,11 +84,11 @@ describe("multiplexer integration daemon lifecycle", function () {
     );
   });
 
-  it("stops a forceRespawnDaemon daemon when its Connector closes", async function () {
+  it("stops an enableDebugMode daemon when its Connector closes", async function () {
     context = createIntegrationContext("daemon-force-close", {
       multiplexerDaemonIdleTimeout: 30000,
     });
-    const connector = context.createConnector({ forceRespawnDaemon: true });
+    const connector = context.createConnector({ enableDebugMode: true });
     await connector.connectDevices(-1, null, false);
     const info = await waitFor(() => getUsableDiscovery(context.discovery));
     await connector.close();
@@ -137,10 +137,10 @@ describe("multiplexer integration daemon lifecycle", function () {
       type: "emit-control-socket-error",
       message: "integration control socket error",
     });
-    await waitFor(() => !failedClient.ready, 3000);
+    await waitFor(() => failedClient.status === "disconnected", 3000);
 
     assert(processExists(info.pid));
-    assert.strictEqual(healthyClient.ready, true);
+    assert.strictEqual(healthyClient.status, "connected");
     assert.strictEqual(
       (await getHealth(context.paths.controlEndpoint)).body.ok,
       true

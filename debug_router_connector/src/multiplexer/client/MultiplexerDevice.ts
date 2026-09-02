@@ -59,7 +59,7 @@ export class MultiplexerDevice {
   }
 
   startWatchClient(): void {
-    void this.getDaemonClient()
+    void this.daemonClient
       .call("startDeviceClientWatcher", {
         deviceId: this.serial,
       })
@@ -71,14 +71,14 @@ export class MultiplexerDevice {
   }
 
   async stopWatchClient(): Promise<void> {
-    await this.getDaemonClient().call("stopDeviceClientWatcher", {
+    await this.daemonClient.call("stopDeviceClientWatcher", {
       deviceId: this.serial,
     });
   }
 
   disConnect(): void {
     this.connected = false;
-    void this.getDaemonClient()
+    void this.daemonClient
       .call("disconnectDevice", {
         deviceId: this.serial,
       })
@@ -87,10 +87,6 @@ export class MultiplexerDevice {
           `Failed to disconnect multiplexer device: ${error.message}`,
         );
       });
-  }
-
-  private getDaemonClient(): MultiplexerDaemonClient {
-    return this.daemonClient;
   }
 }
 

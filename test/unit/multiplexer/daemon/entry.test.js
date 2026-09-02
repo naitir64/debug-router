@@ -18,9 +18,6 @@ const entryModule = rewire(
 );
 const { parseEntryOption, startMultiplexerDaemonEntry } = entryModule;
 const {
-  DriverReportServiceImpl,
-} = require("../../../../debug_router_connector/dist/cjs/src/report/interface/DriverReportServiceImpl");
-const {
   getDriverReportService,
   setDriverReportService,
 } = require("../../../../debug_router_connector/dist/cjs/src/report/interface/DriverReportService");
@@ -247,7 +244,7 @@ describe("multiplexer daemon entry", function () {
         enableWebSocket: true,
         physicalConnectorOption: { enableAndroid: true },
       });
-      assert(getDriverReportService() instanceof DriverReportServiceImpl);
+      assert.strictEqual(getDriverReportService(), null);
       await host.start();
       assert.strictEqual(
         fs.existsSync(path.join(tempDir, "daemon.lock")),

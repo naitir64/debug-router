@@ -154,7 +154,8 @@ function loadConnectorWithFakes(config = {}) {
       state.managers.push(this);
     }
 
-    async stopDaemonForDebugging() {
+    async stopDaemonForDebugging(withRespawn = false) {
+      assert.strictEqual(withRespawn, false);
       state.forceStopCalls++;
     }
   }
@@ -165,18 +166,18 @@ function loadConnectorWithFakes(config = {}) {
       this.calls = [];
       this.connectCalls = 0;
       this.closeCalls = 0;
-      this.ready = false;
+      this.status = "disconnected";
       state.clients.push(this);
     }
 
     async connect() {
-      this.ready = true;
+      this.status = "connected";
       this.connectCalls++;
       state.connectCalls++;
     }
 
     async call(method, params) {
-      this.ready = true;
+      this.status = "connected";
       this.calls.push({
         method,
         params,
@@ -211,8 +212,8 @@ function loadConnectorWithFakes(config = {}) {
       };
     }
 
-    subscribeConnectionState(listener) {
-      this.connectionListener = listener;
+    subscribeConnectionEvent(listener) {
+      this.connectionEventListener = listener;
       let active = true;
       return () => {
         if (!active) {
@@ -220,7 +221,7 @@ function loadConnectorWithFakes(config = {}) {
         }
         active = false;
         state.unsubscribeConnectionCalls++;
-        this.connectionListener = undefined;
+        this.connectionEventListener = undefined;
       };
     }
 
@@ -228,12 +229,12 @@ function loadConnectorWithFakes(config = {}) {
       this.listener?.(event);
     }
 
-    emitConnectionState(state) {
-      this.connectionListener?.(state);
+    emitConnectionEvent(event) {
+      this.connectionEventListener?.(event);
     }
 
     async close() {
-      this.ready = false;
+      this.status = "disconnected";
       this.closeCalls++;
       state.closeCalls++;
     }
@@ -284,7 +285,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         multiplexerStartupTimeout: 333,
         multiplexerDaemonIdleTimeout: 444,
         multiplexerRpcTimeout: 555,
-        forceRespawnDaemon: true,
+        enableDebugMode: true,
         enableAndroid: false,
         enableIOS: false,
         enableHarmony: false,
@@ -328,7 +329,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         state.managers[0].option.multiplexerDaemonIdleTimeout,
         444
       );
-      assert.strictEqual(state.managers[0].option.forceRespawnDaemon, true);
+      assert.strictEqual(state.managers[0].option.enableDebugMode, true);
       assert.strictEqual(state.managers[0].option.enableWebSocket, false);
       assert.deepStrictEqual(state.managers[0].option.websocketOption, {
         port: 7777,
@@ -385,7 +386,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("uses all daemon capabilities by default without forceRespawnDaemon", function () {
+  it("uses all daemon capabilities by default without enableDebugMode", function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {
       new DebugRouterConnector({
@@ -402,7 +403,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         },
       });
 
-      assert.strictEqual(state.managers[0].option.forceRespawnDaemon, false);
+      assert.strictEqual(state.managers[0].option.enableDebugMode, false);
       assert.strictEqual(state.managers[0].option.enableWebSocket, true);
       assert.strictEqual(
         state.managers[0].option.daemonEntry,
@@ -435,6 +436,101 @@ describe("DebugRouterConnector multiplexer facade", function () {
         }
       );
     } finally {
+      restore();
+    }
+  });
+
+  it("ignores legacy environment capability overrides", function () {
+    const environmentKeys = [
+      "DriverEnableAndroid",
+      "DriverEnableIOS",
+      "DriverEnableDesktop",
+    ];
+    const originalEnvironment = new Map(
+      environmentKeys.map((key) => [key, process.env[key]])
+    );
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    try {
+      environmentKeys.forEach((key) => {
+        process.env[key] = "false";
+      });
+
+      const sharedConnector = new DebugRouterConnector({
+        manualConnect: true,
+        enableAndroid: true,
+        enableIOS: true,
+        enableHarmony: true,
+        enableDesktop: true,
+      });
+      sharedConnector.applySnapshot({
+        protocolVersion: 1,
+        generatedAt: 1,
+        devices: [
+          createDeviceSnapshot({ serial: "android", os: "Android" }),
+          createDeviceSnapshot({ serial: "ios", os: "iOS" }),
+          createDeviceSnapshot({ serial: "harmony", os: "Harmony" }),
+          createDeviceSnapshot({ serial: "desktop", os: "Mac" }),
+        ],
+        clients: [],
+      });
+
+      new DebugRouterConnector({
+        manualConnect: true,
+        enableDebugMode: true,
+        enableAndroid: true,
+        enableIOS: true,
+        enableHarmony: true,
+        enableDesktop: true,
+      });
+
+      assert.deepStrictEqual(Array.from(sharedConnector.devices.keys()), [
+        "android",
+        "ios",
+        "harmony",
+        "desktop",
+      ]);
+      assert.deepStrictEqual(
+        {
+          enableAndroid:
+            state.managers[0].option.physicalConnectorOption.enableAndroid,
+          enableIOS: state.managers[0].option.physicalConnectorOption.enableIOS,
+          enableHarmony:
+            state.managers[0].option.physicalConnectorOption.enableHarmony,
+          enableDesktop:
+            state.managers[0].option.physicalConnectorOption.enableDesktop,
+        },
+        {
+          enableAndroid: true,
+          enableIOS: true,
+          enableHarmony: true,
+          enableDesktop: true,
+        }
+      );
+      assert.deepStrictEqual(
+        {
+          enableAndroid:
+            state.managers[1].option.physicalConnectorOption.enableAndroid,
+          enableIOS: state.managers[1].option.physicalConnectorOption.enableIOS,
+          enableHarmony:
+            state.managers[1].option.physicalConnectorOption.enableHarmony,
+          enableDesktop:
+            state.managers[1].option.physicalConnectorOption.enableDesktop,
+        },
+        {
+          enableAndroid: true,
+          enableIOS: true,
+          enableHarmony: true,
+          enableDesktop: true,
+        }
+      );
+    } finally {
+      originalEnvironment.forEach((value, key) => {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      });
       restore();
     }
   });
@@ -1262,7 +1358,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         wssPath: "ws://127.0.0.1:8801/mdevices/page/android",
       });
 
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "disconnected",
         error: new Error("daemon lost"),
       });
@@ -1290,7 +1386,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         manualConnect: true,
       });
 
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "disconnected",
         error: new Error("daemon lost"),
       });
@@ -1314,7 +1410,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       await connector.connectDevices(-1, null, true);
       state.clients[0].calls = [];
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "connected",
       });
 
@@ -1396,7 +1492,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         events.push(["device-disconnected", device.serial])
       );
 
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "disconnected",
         error: new Error("daemon lost"),
       });
@@ -1442,7 +1538,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         },
       ]);
 
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "disconnected",
         error: new Error("daemon lost"),
       });
@@ -1492,7 +1588,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
         },
       ]);
 
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "disconnected",
         error: new Error("daemon lost"),
       });
@@ -1545,7 +1641,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       await connector.startWSServer();
       state.clients[0].calls = [];
 
-      state.clients[0].emitConnectionState({
+      state.clients[0].emitConnectionEvent({
         state: "disconnected",
         error: new Error("daemon lost"),
       });
@@ -1949,12 +2045,12 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("stops the connected daemon when a forceRespawnDaemon Connector closes", async function () {
+  it("stops the connected daemon when an enableDebugMode Connector closes", async function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {
       const connector = new DebugRouterConnector({
         manualConnect: true,
-        forceRespawnDaemon: true,
+        enableDebugMode: true,
       });
       await connector.connectDevices();
 
@@ -1972,12 +2068,12 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("does not start a daemon only to stop an unused forceRespawnDaemon Connector", async function () {
+  it("does not start a daemon only to stop an unused enableDebugMode Connector", async function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {
       const connector = new DebugRouterConnector({
         manualConnect: true,
-        forceRespawnDaemon: true,
+        enableDebugMode: true,
       });
 
       await connector.close();
