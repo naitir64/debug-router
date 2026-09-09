@@ -417,6 +417,48 @@ describe("PhysicalConnector", function () {
     assert.strictEqual(client.state.closeCalls, 1);
   });
 
+  it("adds network devices at runtime once per IP and retains the first ports", async function () {
+    const connector = createConnector();
+    const events = collect(connector, "device-connected");
+    try {
+      await Promise.all([
+        connector.watchNetworkDeviceAtIp({ ip: "127.0.0.1", port: [8901] }),
+        connector.watchNetworkDeviceAtIp({ ip: "127.0.0.1", port: [8902] }),
+        connector.watchNetworkDeviceAtIp({ ip: "127.0.0.2", port: [] }),
+      ]);
+      await connector.connectDevices();
+      assert.deepStrictEqual(
+        events.map((device) => device.serial),
+        ["127.0.0.1", "127.0.0.2"]
+      );
+      assert.deepStrictEqual(connector.devices.get("127.0.0.1").ports, [8901]);
+      assert.strictEqual(connector.devicesManager.size, 2);
+      assert.strictEqual(
+        connector.devices.get("127.0.0.2").getHost(),
+        "127.0.0.2"
+      );
+    } finally {
+      await connector.close();
+    }
+  });
+
+  it("deduplicates runtime watches against the constructor network option", async function () {
+    const connector = createConnector({
+      enableNetworkDevice: true,
+      networkDeviceOpt: { ip: "127.0.0.1", port: [8901] },
+    });
+    try {
+      await connector.connectDevices();
+      const device = connector.devices.get("127.0.0.1");
+      await connector.watchNetworkDeviceAtIp({ ip: "127.0.0.1", port: [8902] });
+      assert.strictEqual(connector.devices.get("127.0.0.1"), device);
+      assert.deepStrictEqual(device.ports, [8901]);
+      assert.strictEqual(connector.devicesManager.size, 1);
+    } finally {
+      await connector.close();
+    }
+  });
+
   it("stops all physical resources and makes connector close idempotent", async function () {
     const connector = createConnector();
     const deviceA = createDevice("device-a");

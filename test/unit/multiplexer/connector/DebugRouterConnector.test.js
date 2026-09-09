@@ -276,6 +276,61 @@ describe("DebugRouterConnector multiplexer facade", function () {
     defaultLogger.setOutput(() => {});
   });
 
+  it("forwards network watches without retaining them and respects network visibility", async function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    const connector = new DebugRouterConnector({
+      manualConnect: true,
+      enableNetworkDevice: false,
+    });
+    try {
+      const options = { ip: "127.0.0.1", port: [8901] };
+      await connector.watchNetworkDeviceAtIp(options);
+      await connector.watchNetworkDeviceAtIp(options);
+      assert.deepStrictEqual(
+        state.clients[0].calls,
+        Array(2).fill({ method: "watchNetworkDeviceAtIp", params: options })
+      );
+      connector.applySnapshot({
+        protocolVersion: 1,
+        generatedAt: 1,
+        devices: ["127.0.0.1", "127.0.0.2"].map((serial) =>
+          createDeviceSnapshot({ serial, os: "Network" })
+        ),
+        clients: [1, 2].map((id) =>
+          createClientSnapshot({ id, deviceId: `127.0.0.${id}` })
+        ),
+      });
+      assert.strictEqual(connector.devices.size, 0);
+      assert.strictEqual(connector.usbClients.size, 0);
+      await connector.restoreDesiredState();
+      assert.strictEqual(state.clients[0].calls.length, 2);
+    } finally {
+      await connector.close();
+      restore();
+    }
+  });
+
+  it("propagates network watch RPC errors", async function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes({
+      rejectMethods: ["watchNetworkDeviceAtIp"],
+    });
+    const connector = new DebugRouterConnector({ manualConnect: true });
+    try {
+      const options = { ip: "127.0.0.1", port: [8901] };
+      await assert.rejects(
+        connector.watchNetworkDeviceAtIp(options),
+        /rejected/
+      );
+      assert.strictEqual(state.clients[0].calls.length, 1);
+      state.rejectMethods.clear();
+      await connector.watchNetworkDeviceAtIp(options);
+      assert.strictEqual(state.clients[0].calls.length, 2);
+    } finally {
+      await connector.close();
+      restore();
+    }
+  });
+
   it("constructs discovery, manager, and daemon client with explicit multiplexer options", function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {

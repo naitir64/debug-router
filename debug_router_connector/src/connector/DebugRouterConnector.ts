@@ -318,6 +318,13 @@ export class DebugRouterConnector {
     return this.upsertClientSnapshots(snapshots);
   }
 
+  async watchNetworkDeviceAtIp(options: {
+    ip: string;
+    port: number[];
+  }): Promise<void> {
+    await this.daemonClient.call("watchNetworkDeviceAtIp", options);
+  }
+
   selecteUsbClient(id: number): void {
     if (this.usbClients.has(id)) {
       this.selectedClient = this.usbClients.get(id);
