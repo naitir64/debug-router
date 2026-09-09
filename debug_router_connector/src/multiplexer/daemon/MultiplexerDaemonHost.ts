@@ -9,7 +9,11 @@ import {
   PhysicalConnector,
   PhysicalConnectorOption,
 } from "../../physical/PhysicalConnector";
-import { getDriverReportService } from "../../report/interface/DriverReportService";
+import {
+  getDriverReportService,
+  setDriverReportService,
+} from "../../report/interface/DriverReportService";
+import { DaemonReportServiceBridge } from "./DaemonReportServiceBridge";
 import { UsbClient } from "../../usb/Client";
 import { defaultLogger } from "../../utils/logger";
 import { WebSocketController } from "../../websocket/WebSocketServer";
@@ -105,6 +109,12 @@ export class MultiplexerDaemonHost {
   private webSocketServerStarted = false;
   private webSocketServerStarting: Promise<WebSocketServerInfo> | null = null;
   private readonly activeControlIds = new Set<number>();
+  private readonly reportControlIds = new Set<number>();
+  private readonly reportBridge = new DaemonReportServiceBridge(
+    (controlId, data) => {
+      this.sendToControl(controlId, { kind: "event", event: "report", data });
+    },
+  );
   private readonly webSocketRequesterControlIds = new Set<number>();
   private readonly activeWebSocketDriverIds = new Set<number>();
   private readonly legacyOwnershipGuard: LegacyOwnershipGuard;
@@ -136,12 +146,20 @@ export class MultiplexerDaemonHost {
       option.connectionTrace,
       process.env.DriverConnectionTracePath,
     );
-    this.physicalConnector =
-      option.physicalConnector ??
-      new PhysicalConnector({
-        ...option.physicalConnectorOption,
-        traceRecorder: this.connectionTraceRecorder,
-      });
+    // Install before physical construction so its startup reports are queued.
+    setDriverReportService(this.reportBridge);
+    try {
+      this.physicalConnector =
+        option.physicalConnector ??
+        new PhysicalConnector({
+          ...option.physicalConnectorOption,
+          traceRecorder: this.connectionTraceRecorder,
+        });
+    } catch (error) {
+      this.reportBridge.close();
+      setDriverReportService(null);
+      throw error;
+    }
     this.legacyOwnershipGuard = new LegacyOwnershipGuard({
       legacyDriverDir: option.legacyDriverDir,
       onStatusChanged: this.handleLegacyOwnershipChanged,
@@ -188,6 +206,9 @@ export class MultiplexerDaemonHost {
   }
 
   async stop(): Promise<void> {
+    this.reportBridge.close();
+    this.reportControlIds.clear();
+    setDriverReportService(null);
     if (
       !this.started &&
       !this.controlServer &&
@@ -364,8 +385,14 @@ export class MultiplexerDaemonHost {
     this.webSocketController?.sendClientList();
   }
 
-  handleControlConnected(controlId: number): void {
+  handleControlConnected(
+    controlId: number,
+    reportServiceEnabled = false,
+  ): void {
     this.activeControlIds.add(controlId);
+    if (reportServiceEnabled) {
+      this.reportControlIds.add(controlId);
+    }
     this.connectionTraceRecorder?.recordControlSocketConnected(controlId, {
       activeControlCount: this.activeControlIds.size,
     });
@@ -386,10 +413,22 @@ export class MultiplexerDaemonHost {
         },
       });
     }
+    this.updateReportStatus();
+  }
+
+  private updateReportStatus(): void {
+    const controlId = this.reportControlIds.values().next().value;
+    this.reportBridge.updateStatus(
+      controlId !== undefined
+        ? { type: "forward", controlId }
+        : { type: "disconnected" },
+    );
   }
 
   handleControlDisconnected(controlId: number): void {
     this.activeControlIds.delete(controlId);
+    this.reportControlIds.delete(controlId);
+    this.updateReportStatus();
     this.connectionTraceRecorder?.recordControlSocketDisconnected(controlId, {
       activeControlCount: this.activeControlIds.size,
     });

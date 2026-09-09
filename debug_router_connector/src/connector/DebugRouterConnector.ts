@@ -3,6 +3,10 @@
 // LICENSE file in the root directory of this source tree.
 
 import { EventEmitter } from "events";
+import {
+  DriverReportService,
+  initDriverReportService,
+} from "../report/interface/DriverReportService";
 import path from "path";
 import { DeviceManager } from "../device/DeviceManager";
 import type { PhysicalConnectorOption } from "../physical/PhysicalConnector";
@@ -62,6 +66,7 @@ type WebSocketServerCompat = {
  */
 
 export type DebugRouterConnectorOption = PhysicalConnectorOption & {
+  reportService?: DriverReportService | null;
   enableWebSocket?: boolean;
   connectionTrace?: ConnectionTraceOptions;
   enableDebugMode?: boolean;
@@ -90,6 +95,7 @@ export class DebugRouterConnector {
   wss: WebSocketServerCompat | null = null;
 
   private readonly events = new EventEmitter();
+  private readonly reportService: DriverReportService | null;
   private readonly daemonClient: MultiplexerDaemonClient;
   private readonly driverClient: DriverClient;
   private enableAndroid: boolean;
@@ -146,8 +152,15 @@ export class DebugRouterConnector {
       websocketOption: {},
     },
   ) {
+    // Reporting implementations can contain circular SDK state and never cross
+    // the daemon boundary, including through configuration logging.
     const msg = "DebugRouterOption:" + JSON.stringify(option);
     defaultLogger.debug(msg);
+
+    this.reportService = initDriverReportService(
+      option.reportService,
+      option.manualConnect,
+    );
 
     this.enableWebSocket = option.enableWebSocket ?? false;
     this.enableAndroid = option.enableAndroid ?? true;
@@ -204,6 +217,7 @@ export class DebugRouterConnector {
       daemonManager,
       controlEndpoint: paths.controlEndpoint,
       rpcTimeout: option.multiplexerRpcTimeout,
+      reportServiceEnabled: this.reportService !== null,
     });
     this.unsubscribeDaemonEvents = this.daemonClient.subscribe((event) =>
       this.applyHostEvent(event),
@@ -778,6 +792,15 @@ export class DebugRouterConnector {
 
   applyHostEvent(event: ControlEvent): void {
     switch (event.event) {
+      case "report":
+        if (!this.closed) {
+          this.reportService?.report(
+            event.data.eventName,
+            event.data.metrics,
+            event.data.categories,
+          );
+        }
+        break;
       case "snapshot":
         this.applySnapshot(event.data);
         break;

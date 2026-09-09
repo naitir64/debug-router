@@ -4,6 +4,10 @@
 
 const assert = require("assert");
 const path = require("path");
+const {
+  getDriverReportService,
+  setDriverReportService,
+} = require("../../../../debug_router_connector/dist/cjs/src/report/interface/DriverReportService");
 
 const daemonClientPath = require.resolve(
   "../../../../debug_router_connector/dist/cjs/src/multiplexer/client/MultiplexerDaemonClient"
@@ -264,7 +268,11 @@ function loadConnectorWithFakes(config = {}) {
 }
 
 describe("DebugRouterConnector multiplexer facade", function () {
+  beforeEach(function () {
+    setDriverReportService(null);
+  });
   afterEach(function () {
+    setDriverReportService(null);
     defaultLogger.setOutput(() => {});
   });
 
@@ -2098,6 +2106,130 @@ describe("DebugRouterConnector multiplexer facade", function () {
       connector.nextClientId = 4294967295;
       assert.strictEqual(connector.createClientId(), 1);
     } finally {
+      restore();
+    }
+  });
+  it("initializes one shared report service and keeps disabled instances local", async function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    const initialized = [];
+    const reports = [];
+    const service = {
+      init(manual) {
+        initialized.push(manual);
+      },
+      report(...args) {
+        reports.push(args);
+      },
+    };
+    const connectors = [];
+    try {
+      const first = new DebugRouterConnector({
+        manualConnect: true,
+        reportService: service,
+      });
+      connectors.push(first);
+      const second = new DebugRouterConnector({
+        manualConnect: true,
+        reportService: {
+          init() {
+            throw new Error("must reuse the initialized instance");
+          },
+          report() {
+            throw new Error("must not use an uninitialized instance");
+          },
+        },
+      });
+      connectors.push(second);
+      const disabled = new DebugRouterConnector({
+        manualConnect: true,
+        reportService: null,
+      });
+      connectors.push(disabled);
+      assert.deepStrictEqual(initialized, [true]);
+      assert.strictEqual(getDriverReportService(), service);
+      assert.deepStrictEqual(
+        state.clients.map((c) => c.option.reportServiceEnabled),
+        [true, true, false]
+      );
+      state.managers.forEach((manager) => {
+        assert.strictEqual(
+          "reportService" in manager.option.physicalConnectorOption,
+          false
+        );
+      });
+      const event = {
+        kind: "event",
+        event: "report",
+        data: {
+          eventName: "device",
+          metrics: null,
+          categories: { serial: "one" },
+        },
+      };
+      state.clients[2].emitHostEvent(event);
+      assert.deepStrictEqual(reports, []);
+      await first.close();
+      state.clients[1].emitHostEvent(event);
+      assert.deepStrictEqual(reports, [["device", null, { serial: "one" }]]);
+      await second.close();
+      const later = new DebugRouterConnector({
+        manualConnect: true,
+        reportService: service,
+      });
+      connectors.push(later);
+      assert.deepStrictEqual(initialized, [true]);
+      assert.strictEqual(getDriverReportService(), service);
+    } finally {
+      await Promise.all(connectors.map((connector) => connector.close()));
+      restore();
+    }
+  });
+
+  it("propagates reporting errors and retries unsuccessful initialization", async function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    const connectors = [];
+    let initCalls = 0;
+    const service = {
+      init() {
+        if (++initCalls === 1) throw new Error("init failed");
+      },
+      report() {
+        throw new Error("report failed");
+      },
+    };
+    try {
+      assert.throws(
+        () =>
+          new DebugRouterConnector({
+            manualConnect: true,
+            reportService: service,
+          }),
+        /init failed/
+      );
+      assert.strictEqual(getDriverReportService(), null);
+      assert.strictEqual(state.clients.length, 0);
+      connectors.push(
+        new DebugRouterConnector({
+          manualConnect: true,
+          reportService: service,
+        })
+      );
+      assert.deepStrictEqual(
+        state.clients.map((c) => c.option.reportServiceEnabled),
+        [true]
+      );
+      assert.strictEqual(initCalls, 2);
+      assert.throws(
+        () =>
+          state.clients[0].emitHostEvent({
+            kind: "event",
+            event: "report",
+            data: { eventName: "error", metrics: null, categories: {} },
+          }),
+        /report failed/
+      );
+    } finally {
+      await Promise.all(connectors.map((connector) => connector.close()));
       restore();
     }
   });

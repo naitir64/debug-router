@@ -5,8 +5,6 @@
 import type { MultiplexerDebugInfo } from "../protocol";
 import { defaultLogger } from "../../utils/logger";
 import type { PhysicalConnectorOption } from "../../physical/PhysicalConnector";
-import { setDriverReportService } from "../../report/interface/DriverReportService";
-import { DriverReportServiceImpl } from "../../report/interface/DriverReportServiceImpl";
 import type { ConnectionTraceOptions } from "../../trace/ConnectionTraceRecorder";
 import { setTimeout } from "timers/promises";
 import { MultiplexerDaemonHost } from "./MultiplexerDaemonHost";
@@ -111,8 +109,6 @@ export function parseEntryOption(argv: string[]): MultiplexerDaemonEntryOption {
 function createDaemonHost(
   entryOption: MultiplexerDaemonEntryOption,
 ): MultiplexerDaemonHost {
-  const reportService = new DriverReportServiceImpl();
-  setDriverReportService(reportService);
   const hostOption: MultiplexerDaemonHostOption = {
     controlEndpoint: entryOption.controlEndpoint,
     protocolVersion: entryOption.protocolVersion,

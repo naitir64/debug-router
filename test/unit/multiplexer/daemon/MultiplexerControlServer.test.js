@@ -158,7 +158,7 @@ describe("MultiplexerControlServer", function () {
     await server.start();
     const transport = await connectTransport(endpoint);
     const responsePromise = waitForMessage(transport);
-    transport.send({ kind: "register" });
+    transport.send({ kind: "register", reportServiceEnabled: false });
     assert.deepStrictEqual(await responsePromise, {
       kind: "register-response",
       ok: true,
@@ -194,7 +194,7 @@ describe("MultiplexerControlServer", function () {
       await server.start();
       const transport = await connectTransport(endpoint);
       const closed = new Promise((resolve) => transport.onClose(resolve));
-      transport.send({ kind: "register" });
+      transport.send({ kind: "register", reportServiceEnabled: false });
       await registerResponseSendAttempted;
       await closed;
       await waitForProvisionalTransportsToBeRemoved(server);
@@ -214,7 +214,7 @@ describe("MultiplexerControlServer", function () {
     await server.start();
     const transport = await connectTransport(endpoint);
     let responsePromise = waitForMessage(transport);
-    transport.send({ kind: "register" });
+    transport.send({ kind: "register", reportServiceEnabled: false });
     await responsePromise;
 
     responsePromise = waitForMessage(transport);
@@ -285,7 +285,7 @@ describe("MultiplexerControlServer", function () {
       closed = true;
     });
 
-    transport.send({ kind: "register" });
+    transport.send({ kind: "register", reportServiceEnabled: false });
     assert.deepStrictEqual(await responsePromise, {
       kind: "register-response",
       ok: true,

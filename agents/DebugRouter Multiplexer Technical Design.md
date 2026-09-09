@@ -278,6 +278,11 @@ The internal control plane uses Node.js `node:net`. Because a socket is a byte s
 
 `MultiplexerControlTransport.send()` writes one complete frame with `socket.write()`. It intentionally does not add an application-level write queue or a separate pause/resume backpressure state machine; ordering and system buffering are provided by `net.Socket`, while the control protocol enforces bounded frame and receive-buffer sizes.
 
+Register requires `reportServiceEnabled: boolean`; missing or non-boolean values
+are rejected. Each Connector repeats its flag on reconnect. The server sends
+`register-response` before Host replays
+snapshots or drains reports, so the client can install normal event handling first.
+
 The first framed message on a newly accepted socket must be one of:
 
 - `health`: daemon replies with `health-response` and closes the short-lived probe connection.
@@ -362,9 +367,10 @@ The default RPC timeout is 5000 ms. RPCs with a positive operation `timeout` use
 snapshot
 legacy-ownership-changed
 client-message
+report
 ```
 
-All three events use the same envelope, so transport handling can validate `kind`, `event`, optional diagnostics, and event-specific `data` independently:
+All four events use the same envelope, so transport handling can validate `kind`, `event`, optional diagnostics, and event-specific `data` independently:
 
 ```ts
 type ControlEventEnvelope<Event extends string, Data> = {
@@ -855,7 +861,13 @@ Current Multiplexer-related `DebugRouterConnectorOption` fields:
 
 `MultiplexerDaemonHostOption.memoizedNotificationTtlMs` controls the daemon-side cache validity period and pending retry interval and defaults to 1000 ms. It is currently an internal Host option used for embedding and deterministic tests, not a public `DebugRouterConnectorOption` propagated through daemon startup.
 
-The daemon-side `PhysicalConnector` receives transport endpoints and serializable options such as `adbHostPort`, `hdcHostPort`, `usbConnectOpt`, `networkDeviceOpt`, and `connectionTrace`. In the normal shared-daemon path, generally available platform options are enabled in the daemon and each Connector filters the devices, clients, snapshots, and events it exposes according to its own option flags. Only `enableDebugMode` makes each replacement daemon use that Connector's `manualConnect`, WebSocket, and platform enable flags exactly. The daemon entry validates `connectionTrace.enabled` as boolean, `connectionTrace.output` as a string path, and `connectionTrace.bufferSize` as a non-negative finite number; recorder instances are rejected. `reportService` is not serialized across the process boundary; the daemon creates its own local report service.
+The daemon-side `PhysicalConnector` receives transport endpoints and serializable options such as `adbHostPort`, `hdcHostPort`, `usbConnectOpt`, `networkDeviceOpt`, and `connectionTrace`. In the normal shared-daemon path, generally available platform options are enabled in the daemon and each Connector filters the devices, clients, snapshots, and events it exposes according to its own option flags. Only `enableDebugMode` makes each replacement daemon use that Connector's `manualConnect`, WebSocket, and platform enable flags exactly. The daemon entry validates `connectionTrace.enabled` as boolean, `connectionTrace.output` as a string path, and `connectionTrace.bufferSize` as a non-negative finite number; recorder instances are rejected. `reportService` is a Connector-local option and is not serialized across the process boundary or included in configuration logs. `DebugRouterConnector` initializes the first non-null service successfully supplied to its reporting module with the caller's `manualConnect`, then reuses that instance for later enabled Connectors. Closing or reconnecting a Connector does not reset initialization. Null or omitted options disable only that Connector. Initialization failures propagate to the caller and leave the shared service unset, so later construction can retry. The public `DriverReportService` interface and `getDriverReportService()` remain compatible.
+
+Host owns a `DaemonReportServiceBridge`, installed through the daemon's existing report-service getter before constructing `PhysicalConnector`. Its `init()` is intentionally empty; existing daemon-side `report()` call sites remain unchanged. The bridge stores report data (`eventName`, `metrics`, `categories`) and a status. `disconnected` means no connected Connector has reporting enabled, including when only reporting-disabled Connectors are connected; reports are queued in either case. Otherwise, `forward` sends each report to the first registered, still-connected reporting-enabled control. A new connection does not displace that recipient. Host updates bridge status on registration/disconnection; each update drains or pauses the FIFO using the current status. Host shutdown closes and uninstalls its bridge. `close()` clears the queue and enters the terminal `closed` state, which ignores reports and later status updates.
+
+The bridge retains at most 1000 queued reports, discarding the oldest event when a new report reaches a full queue. In the forward state, new reports are sent directly to the selected Connector. It retains the supplied parameter references, normalizes absent `metrics` and `categories` to `null`, and leaves JSON serialization to the control transport without separate byte-size accounting. Queued events are dequeued once before delivery; failed sends are not retried across Connectors. The protocol provides best-effort telemetry, not acknowledged delivery. The receiving Connector invokes its shared initialized service directly, preserving the reporting implementation's error behavior. Telemetry enrichment and upload belong entirely to the caller-supplied implementation.
+
+Multiplexer has not had a stable release. Reporting capability registration and the targeted `report` event are part of protocol version 1; compatibility with earlier development builds is not maintained.
 
 The public facade no longer treats `enableMultiplexer`, `enableProxy`, `proxyDaemonIdleTimeout`, or `DEBUG_ROUTER_PROXY*` as compatibility entries, and it does not mutate constructor options through a `setOptionByEnv()` path. Callers should configure the facade through `DebugRouterConnectorOption` and use the `multiplexer*` naming. The remaining environment reads are narrow legacy/runtime integrations: `DriverCloseMultiOpen` controls legacy ownership handling, and `DriverConnectionTracePath` provides the existing trace-output fallback inside the daemon.
 
