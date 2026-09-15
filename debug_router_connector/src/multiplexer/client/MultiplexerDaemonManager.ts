@@ -145,6 +145,16 @@ export class MultiplexerDaemonManager {
   }
 
   async stopDaemonForDebugging(withRespawn: boolean = false): Promise<void> {
+    /**
+     * For debugging and testing Connector internals only.
+     * This is not part of the normal application debugging workflow
+     * It is not recommended for external callers.
+     *
+     * Stops the daemon, optionally restarting it, when enableDebugMode is enabled.
+     * With enableDebugMode enabled, ensureDaemon() stops and restarts the daemon instead
+     * of reusing an existing instance, allowing Connector developers to load
+     * updated daemon code while investigating internal issues.
+     */
     while (!this.acquireSpawnLock()) {
       await this.sleepFor(this.readyPollInterval);
     }
@@ -176,13 +186,17 @@ export class MultiplexerDaemonManager {
     while (true) {
       const validation = await this.probeDaemonHealthWithRetry();
       if (await this.handleDiscoveryResult(validation)) return;
-      // If another connector process has spawned an unavailable daemon, retry ensureDaemon.
     }
   }
 
   private async handleDiscoveryResult(
     validation: MultiplexerDiscoveryValidation,
   ): Promise<boolean> {
+    /**
+     * Returns false only when tryStartDaemon() fails to acquire spawn.lock.
+     * In this case, another Manager is handling daemon startup, so ensureDaemon() retries
+     * the health probe to observe its progress.
+     */
     if (validation.status === "usable") {
       return true;
     }
@@ -223,6 +237,7 @@ export class MultiplexerDaemonManager {
       process.execPath,
       [this.daemonEntry, ...this.createDaemonEntryArgs()],
       {
+        // Set argv0 to daemonProcessName so find-process can identify the daemon later.
         argv0: this.daemonProcessName,
         detached: true,
         // Keep daemon logs visible in the spawning Connector process.
@@ -238,6 +253,10 @@ export class MultiplexerDaemonManager {
   }
 
   private async waitUntilReady(timeout: number): Promise<void> {
+    /**
+     * Waits for the daemon to be ready.
+     * Resolves when the daemon is ready; throws if readiness fails or times out.
+     */
     const startedAt = this.now();
     let lastValidation: MultiplexerDiscoveryValidation | null = null;
     let lastHealthCheckFailure: string | null = null;
@@ -344,6 +363,7 @@ export class MultiplexerDaemonManager {
   }
 
   private async findDaemonProcessIds(): Promise<number[]> {
+    // use daemonProcessName to find the daemon process.
     let daemonProcessIds: number[];
     if (process.platform === "win32") {
       try {
@@ -445,6 +465,29 @@ export class MultiplexerDaemonManager {
   }
 
   private createDaemonEntryArgs(): string[] {
+    /**
+     * Builds the command-line arguments passed to the daemon entry.
+     *
+     * Required arguments (always passed):
+     * | Argument                          | Description                      |
+     * | --------------------------------- | -------------------------------- |
+     * | --control-endpoint                | Daemon control IPC endpoint.     |
+     * | --protocol-version                | Connector's protocol version.    |
+     * | --multiplexer-daemon-idle-timeout | Daemon idle shutdown timeout.    |
+     *
+     * Optional arguments (passed when configured):
+     * | Argument                    | Description                            |
+     * | --------------------------- | -------------------------------------- |
+     * | --debug-info                | Debug metadata, serialized as JSON.    |
+     * | --legacy-driver-dir         | Legacy ownership data directory.       |
+     * | --enable-websocket          | Whether to enable WebSocket support.   |
+     * | --websocket-port            | WebSocket server port.                 |
+     * | --websocket-room-id         | WebSocket room identifier.             |
+     * | --connection-trace          | Connection tracing options as JSON.    |
+     * | --physical-connector-option | Physical connector options as JSON.    |
+     *
+     * Optional boolean values are passed even when explicitly set to false.
+     */
     const args = [
       "--control-endpoint",
       this.controlEndpoint,
