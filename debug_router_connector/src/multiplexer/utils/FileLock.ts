@@ -5,6 +5,7 @@
 import fs from "fs";
 import path from "path";
 import { randomBytes } from "crypto";
+import { defaultLogger } from "../../utils/logger";
 
 const FILE_LOCK_REMOVE_MAX_RETRIES = 3;
 const FILE_LOCK_REMOVE_RETRY_DELAY_MS = 10;
@@ -26,6 +27,8 @@ export class FileLock {
 
   acquire(): boolean {
     if (this.locked) {
+      // Best-effort ownership check: another process can replace the lock
+      // after this read, so a successful check does not guarantee continued ownership.
       if (this.owner && isSameOwner(this.readOwner(), this.owner)) {
         return true;
       }
@@ -36,6 +39,8 @@ export class FileLock {
     try {
       fs.mkdirSync(path.dirname(this.lockPath), { recursive: true });
       fs.mkdirSync(this.lockPath);
+      // Best-effort publication: mkdir and writing owner.json are separate
+      // operations. Cleanup must allow time for an ownerless directory to initialize.
       this.writeOwner(owner);
       this.owner = owner;
       this.locked = true;
@@ -123,7 +128,15 @@ export class FileLock {
       return now - owner.createdAt > timeout;
     }
 
-    return true;
+    try {
+      return now - fs.statSync(this.lockPath).mtimeMs > timeout;
+    } catch (error: any) {
+      defaultLogger.warn(
+        `Failed to stat lock directory ${this.lockPath}: ${error?.code}: ${error?.message}`,
+      );
+      // A disappeared lock needs no cleanup; other stat failures are treated as stale.
+      return error?.code !== "ENOENT";
+    }
   }
 
   cleanupStale(timeout: number, now: number = Date.now()): boolean {

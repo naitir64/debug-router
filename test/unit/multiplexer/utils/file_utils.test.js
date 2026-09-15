@@ -281,31 +281,67 @@ describe("multiplexer FileLock", function () {
     assert.deepStrictEqual(new FileLock(lockPath).readOwner(), freshOwner);
   });
 
-  it("treats ownerless and invalid-owner lock directories as stale", function () {
+  it("uses directory freshness for ownerless and invalid-owner locks", function () {
     const now = Date.now();
-    const ownerlessLockPath = path.join(tempDir, "ownerless.lock");
-    const invalidOwnerLockPath = path.join(tempDir, "invalid-owner.lock");
+    for (const invalidOwner of [false, true]) {
+      const lockPath = path.join(
+        tempDir,
+        invalidOwner ? "invalid.lock" : "empty.lock"
+      );
+      fs.mkdirSync(lockPath);
+      if (invalidOwner) {
+        fs.writeFileSync(path.join(lockPath, "owner.json"), "{bad");
+      }
+      fs.utimesSync(lockPath, now / 1000, now / 1000);
+      const lock = new FileLock(lockPath);
+      assert.strictEqual(lock.cleanupStale(1000, now), false);
+      assert.strictEqual(fs.existsSync(lockPath), true);
+      fs.utimesSync(lockPath, (now - 5000) / 1000, (now - 5000) / 1000);
+      assert.strictEqual(lock.cleanupStale(1000, now), true);
+      assert.strictEqual(fs.existsSync(lockPath), false);
+    }
+  });
 
-    fs.mkdirSync(ownerlessLockPath);
-    fs.mkdirSync(invalidOwnerLockPath);
-    fs.writeFileSync(path.join(invalidOwnerLockPath, "owner.json"), "{bad");
-
-    assert.strictEqual(
-      new FileLock(ownerlessLockPath).cleanupStale(
-        Number.MAX_SAFE_INTEGER,
-        now
-      ),
-      true
-    );
-    assert.strictEqual(
-      new FileLock(invalidOwnerLockPath).cleanupStale(
-        Number.MAX_SAFE_INTEGER,
-        now
-      ),
-      true
-    );
-    assert.strictEqual(fs.existsSync(ownerlessLockPath), false);
-    assert.strictEqual(fs.existsSync(invalidOwnerLockPath), false);
+  it("logs stat failures and treats only ENOENT as not stale", function () {
+    const {
+      defaultLogger,
+    } = require("../../../../debug_router_connector/dist/cjs/src/utils/logger");
+    const lockPath = path.join(tempDir, "stat-failed.lock");
+    fs.mkdirSync(lockPath);
+    const lock = new FileLock(lockPath);
+    const originalStatSync = fs.statSync;
+    const originalWarn = defaultLogger.warn;
+    const warnings = [];
+    defaultLogger.warn = (message) => warnings.push(message);
+    try {
+      for (const code of [
+        "ENOENT",
+        "EACCES",
+        "EPERM",
+        "EIO",
+        "ENOTDIR",
+        undefined,
+      ]) {
+        fs.statSync = (targetPath, ...args) => {
+          if (targetPath === lockPath) {
+            throw Object.assign(new Error("stat failed"), { code });
+          }
+          return originalStatSync(targetPath, ...args);
+        };
+        const count = warnings.length;
+        assert.strictEqual(
+          lock.isLockStateStale(null, 1000, Date.now()),
+          code !== "ENOENT"
+        );
+        assert.strictEqual(warnings.length, count + 1);
+        assert(warnings[count].includes(lockPath));
+        assert(warnings[count].includes("stat failed"));
+        if (code) assert(warnings[count].includes(code));
+      }
+    } finally {
+      fs.statSync = originalStatSync;
+      defaultLogger.warn = originalWarn;
+    }
   });
 
   it("treats a lock with a dead owner process as stale", function () {
