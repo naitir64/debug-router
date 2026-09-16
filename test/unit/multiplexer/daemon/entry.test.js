@@ -263,6 +263,11 @@ describe("multiplexer daemon entry", function () {
   it("registers cleanup handlers before starting and cleans on beforeExit", async function () {
     const restoreHost = replaceDaemonHostCtor();
     const processOnce = stubProcessOnce();
+    const processExit = stubProcessExit();
+    const restoreTimers = entryModule.__set__("promises_1", {
+      // The exit must happen even while the timeout promise remains pending.
+      setTimeout: () => new Promise(() => {}),
+    });
     try {
       const option = createOption(tempDir);
       const host = await startMultiplexerDaemonEntry([
@@ -290,11 +295,116 @@ describe("multiplexer daemon entry", function () {
         .handler();
       await new Promise((resolve) => setImmediate(resolve));
       assert.strictEqual(FakeDaemonHost.instances[0].stopCalls, 1);
+      assert.deepStrictEqual(processExit.exitCodes, [0]);
     } finally {
+      restoreTimers();
+      processExit.restore();
       processOnce.restore();
       restoreHost();
     }
   });
+
+  for (const [trigger, expectedExitCode] of [
+    ["idle", 1],
+    ["shutdown", 1],
+    ["beforeExit", 1],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["uncaughtException", 1],
+    ["unhandledRejection", 1],
+  ]) {
+    it(`bounds hanging Host cleanup for ${trigger}`, async function () {
+      const processOnce = stubProcessOnce();
+      const processExit = stubProcessExit();
+      const originalExitCode = process.exitCode;
+      const timers = [];
+      const restoreTimers = entryModule.__set__("promises_1", {
+        setTimeout(delay) {
+          return new Promise((resolve) => {
+            timers.push({ callback: resolve, delay });
+          });
+        },
+      });
+      try {
+        process.exitCode = 0;
+        const host = new FakeDaemonHost({});
+        host.stop = () => {
+          host.stopCalls++;
+          return new Promise(() => {});
+        };
+        entryModule.__get__("registerProcessCleanup")(host);
+        if (trigger === "idle") {
+          void host.idleHandler();
+        } else if (trigger === "shutdown") {
+          void host.shutdownHandler();
+        } else {
+          processOnce.registrations
+            .find((entry) => entry.event === trigger)
+            .handler(new Error("test fatal error"));
+        }
+
+        assert.strictEqual(host.stopCalls, 1);
+        assert.strictEqual(timers.length, 1);
+        assert.strictEqual(timers[0].delay, 3000);
+        assert.deepStrictEqual(processExit.exitCodes, []);
+
+        // A later signal must share the existing cleanup deadline.
+        if (trigger === "beforeExit") {
+          processOnce.registrations
+            .find((entry) => entry.event === "SIGTERM")
+            .handler();
+          assert.strictEqual(host.stopCalls, 1);
+          assert.strictEqual(timers.length, 1);
+        }
+
+        timers[0].callback();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.deepStrictEqual(
+          processExit.exitCodes,
+          trigger === "beforeExit" ? [1, 143] : [expectedExitCode]
+        );
+        assert.strictEqual(process.exitCode, 0);
+      } finally {
+        restoreTimers();
+        process.exitCode = originalExitCode;
+        processExit.restore();
+        processOnce.restore();
+      }
+    });
+  }
+
+  for (const [exitCode, stopError, expectedExitCode] of [
+    [0, new Error("cleanup failed"), 1],
+    [7, null, 7],
+    [7, new Error("cleanup failed"), 7],
+  ]) {
+    it(`preserves beforeExit status ${exitCode} with cleanup error ${!!stopError}`, async function () {
+      const processOnce = stubProcessOnce();
+      const processExit = stubProcessExit();
+      const originalExitCode = process.exitCode;
+      const restoreTimers = entryModule.__set__("promises_1", {
+        setTimeout: () => new Promise(() => {}),
+      });
+      try {
+        process.exitCode = exitCode;
+        FakeDaemonHost.stopError = stopError;
+        const host = new FakeDaemonHost({});
+        entryModule.__get__("registerProcessCleanup")(host);
+        processOnce.registrations
+          .find((entry) => entry.event === "beforeExit")
+          .handler();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.strictEqual(host.stopCalls, 1);
+        assert.deepStrictEqual(processExit.exitCodes, [expectedExitCode]);
+        assert.strictEqual(process.exitCode, exitCode);
+      } finally {
+        restoreTimers();
+        process.exitCode = originalExitCode;
+        processExit.restore();
+        processOnce.restore();
+      }
+    });
+  }
 
   it("stops Host and exits for idle and shutdown requests", async function () {
     const restoreHost = replaceDaemonHostCtor();
