@@ -13,9 +13,14 @@ import type { MultiplexerDaemonHostOption } from "./MultiplexerDaemonHost";
 const ENTRY_CLEANUP_TIMEOUT = 3000;
 
 export type MultiplexerDaemonEntryOption = {
+  // Required daemon startup arguments supplied by Manager.
   controlEndpoint: string;
   protocolVersion: number;
   multiplexerDaemonIdleTimeout: number;
+
+  // Optional Host configuration parsed from daemon startup arguments.
+  // Undefined leaves the corresponding Host option unset so Host can apply
+  // its own default behavior.
   debugInfo?: MultiplexerDebugInfo;
   legacyDriverDir?: string;
   enableWebSocket?: boolean;
@@ -116,16 +121,16 @@ function createDaemonHost(
     ...(entryOption.debugInfo ? { debugInfo: entryOption.debugInfo } : {}),
   };
   if (entryOption.legacyDriverDir !== undefined) {
-    Object.assign(hostOption, { legacyDriverDir: entryOption.legacyDriverDir });
+    hostOption.legacyDriverDir = entryOption.legacyDriverDir;
   }
   if (entryOption.enableWebSocket !== undefined) {
-    Object.assign(hostOption, { enableWebSocket: entryOption.enableWebSocket });
+    hostOption.enableWebSocket = entryOption.enableWebSocket;
   }
   if (entryOption.connectionTrace !== undefined) {
-    Object.assign(hostOption, { connectionTrace: entryOption.connectionTrace });
+    hostOption.connectionTrace = entryOption.connectionTrace;
   }
   if (entryOption.websocketOption !== undefined) {
-    Object.assign(hostOption, { websocketOption: entryOption.websocketOption });
+    hostOption.websocketOption = entryOption.websocketOption;
   }
   if (entryOption.physicalConnectorOption !== undefined) {
     hostOption.physicalConnectorOption = entryOption.physicalConnectorOption;
@@ -136,11 +141,7 @@ function createDaemonHost(
 function registerProcessCleanup(host: MultiplexerDaemonHost): void {
   let cleanupPromise: Promise<unknown> | undefined;
 
-  const cleanup = (
-    exitCode: number,
-    forceTimeout: boolean = false,
-    source?: "idle" | "shutdown",
-  ): Promise<unknown> => {
+  const cleanup = (source?: "idle" | "shutdown"): Promise<unknown> => {
     if (cleanupPromise) {
       return cleanupPromise;
     }
@@ -148,18 +149,17 @@ function registerProcessCleanup(host: MultiplexerDaemonHost): void {
     cleanupPromise = (async () => {
       try {
         const stopPromise = Promise.resolve(host.stop());
-        if (forceTimeout) {
-          await Promise.race([
-            stopPromise,
-            setTimeout(ENTRY_CLEANUP_TIMEOUT).then(() => {
-              throw new Error(
-                `Multiplexer daemon cleanup timed out after ${ENTRY_CLEANUP_TIMEOUT}ms`,
-              );
-            }),
-          ]);
-        } else {
-          await stopPromise;
-        }
+
+        // Apply a cleanup time limit in every shutdown scenario to prevent
+        // a stalled Host shutdown from blocking process exit.
+        await Promise.race([
+          stopPromise,
+          setTimeout(ENTRY_CLEANUP_TIMEOUT).then(() => {
+            throw new Error(
+              `Multiplexer daemon cleanup timed out after ${ENTRY_CLEANUP_TIMEOUT}ms`,
+            );
+          }),
+        ]);
         return undefined;
       } catch (error: any) {
         defaultLogger.error(
@@ -167,27 +167,26 @@ function registerProcessCleanup(host: MultiplexerDaemonHost): void {
             ? `Multiplexer daemon ${source} cleanup failed: ${error?.message}`
             : `Multiplexer daemon cleanup failed: ${error?.message}`,
         );
-        if (exitCode === 0) {
-          process.exitCode = 1;
-        }
         return error;
       }
     })();
     return cleanupPromise;
   };
-  const cleanupAfterHostRequest = async (source: "idle" | "shutdown") => {
-    const stopError = await cleanup(0, false, source);
-    process.exit(stopError ? 1 : 0);
-  };
-  const cleanupAndExit = (exitCode: number) => {
-    void cleanup(exitCode, true).finally(() => process.exit(exitCode));
+  const cleanupAndExit = async (
+    exitCode: number,
+    source?: "idle" | "shutdown",
+  ): Promise<void> => {
+    const stopError = await cleanup(source);
+    // Preserve an existing failure code; failed cleanup turns success into failure.
+    process.exit(stopError && exitCode === 0 ? 1 : exitCode);
   };
 
-  host.setIdleTimeoutHandler(() => cleanupAfterHostRequest("idle"));
-  host.setShutdownHandler(() => cleanupAfterHostRequest("shutdown"));
+  host.setIdleTimeoutHandler(() => cleanupAndExit(0, "idle"));
+  host.setShutdownHandler(() => cleanupAndExit(0, "shutdown"));
 
   process.once("beforeExit", () => {
-    void cleanup(process.exitCode ?? 0);
+    // Exit after cleanup instead of waiting for the remaining timeout timer.
+    cleanupAndExit(process.exitCode ?? 0);
   });
   process.once("SIGINT", () => {
     cleanupAndExit(130);
