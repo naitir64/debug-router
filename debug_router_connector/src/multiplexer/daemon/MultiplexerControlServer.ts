@@ -33,6 +33,13 @@ export type MultiplexerControlServerOption = {
   handshakeTimeoutMs?: number;
 };
 
+/**
+ * MultiplexerControlServer:
+ * Manages the daemon's control channel by accepting connections,
+ * handling health probes and registration, dispatching RPC requests
+ * to the daemon Host, and sending responses and Host events to clients.
+ */
+
 export class MultiplexerControlServer {
   readonly controlEndpoint: string;
   readonly connections: Map<number, MultiplexerControlConnection> = new Map();
@@ -106,6 +113,11 @@ export class MultiplexerControlServer {
   }
 
   private handleSocket(socket: Socket): void {
+    /**
+     * Tracks a newly connected socket as a provisional connection,
+     * waits for and responds to its handshake message, and rejects
+     * the connection if the handshake times out.
+     */
     const transport = new MultiplexerControlTransport(socket);
     this.provisionalTransports.add(transport);
     let receivedFirstMessage = false;
@@ -127,7 +139,14 @@ export class MultiplexerControlServer {
           isInUse: this.host.isInUse(),
           ...(debugInfo ? { debugInfo } : {}),
         };
-        transport.send(response);
+        try {
+          transport.send(response);
+        } catch (_error) {
+          transport.destroy(
+            _error instanceof Error ? _error : new Error(String(_error)),
+          );
+          return;
+        }
         void transport.end();
         return;
       }
@@ -158,12 +177,15 @@ export class MultiplexerControlServer {
             "First control message must be a valid health or register request",
         },
       };
-      if (transport.writable) {
+      try {
         transport.send(response);
-        void transport.end();
-      } else {
-        transport.destroy();
+      } catch (_error) {
+        transport.destroy(
+          _error instanceof Error ? _error : new Error(String(_error)),
+        );
+        return;
       }
+      void transport.end();
     });
 
     const handshakeTimer = setTimeout(() => {
@@ -176,12 +198,15 @@ export class MultiplexerControlServer {
           message: "Timed out waiting for the first control message",
         },
       };
-      if (transport.writable) {
+      try {
         transport.send(response);
-        void transport.end();
-      } else {
-        transport.destroy();
+      } catch (_error) {
+        transport.destroy(
+          _error instanceof Error ? _error : new Error(String(_error)),
+        );
+        return;
       }
+      void transport.end();
     }, this.option.handshakeTimeoutMs ?? DEFAULT_CONTROL_HANDSHAKE_TIMEOUT_MS);
 
     transport.onClose(() => {
@@ -219,6 +244,10 @@ export class MultiplexerControlServer {
     controlId: number,
     message: ControlRpcRequest,
   ): Promise<void> {
+    /**
+     * Dispatches an RPC request to the daemon Host and sends the result
+     * or error back to the requesting control connection.
+     */
     const connection = this.connections.get(controlId)!;
 
     try {
@@ -230,12 +259,14 @@ export class MultiplexerControlServer {
   }
 
   broadcast(event: ControlEvent): void {
+    // Sends an event to all registered control connections.
     for (const connection of this.connections.values()) {
       connection.send(event);
     }
   }
 
   sendToControl(controlId: number, event: ControlEvent): void {
+    // Sends an event to the specified control connection.
     this.connections.get(controlId)?.send(event);
   }
 

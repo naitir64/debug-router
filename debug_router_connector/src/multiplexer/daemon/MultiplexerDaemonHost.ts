@@ -22,8 +22,10 @@ import {
 import {
   ClientSnapshot,
   ControlEvent,
+  ControlRpcMethod,
   ControlRpcParams,
   ControlRpcRequest,
+  ControlRpcResult,
   DeviceSnapshot,
   MultiplexerDebugInfo,
   Snapshot,
@@ -483,7 +485,7 @@ export class MultiplexerDaemonHost {
   async handleControlRpc(
     controlId: number,
     message: ControlRpcRequest,
-  ): Promise<unknown> {
+  ): Promise<ControlRpcResult[ControlRpcMethod] | void> {
     switch (message.method) {
       case "connectDevices":
         return this.connectDevices(

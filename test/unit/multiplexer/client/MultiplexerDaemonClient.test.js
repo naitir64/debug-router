@@ -232,6 +232,86 @@ describe("MultiplexerDaemonClient", function () {
     assert.strictEqual(client.pendingRpc.size, 0);
   });
 
+  for (const ensureDaemon of [true, false]) {
+    it(`times out a silent Register, retries, and clears the successful handshake timer (ensureDaemon=${ensureDaemon})`, async function () {
+      this.timeout(5000);
+      let replyToRegister = false;
+      let registerCount = 0;
+      const transports = new Set();
+      const rawServer = net.createServer((socket) => {
+        const transport = new MultiplexerControlTransport(socket);
+        transports.add(transport);
+        transport.onClose(() => transports.delete(transport));
+        transport.onMessage((message) => {
+          if (message.kind === "register") {
+            registerCount++;
+            if (replyToRegister) {
+              transport.send({ kind: "register-response", ok: true });
+            }
+          } else if (message.kind === "rpc") {
+            transport.send({
+              kind: "rpc-response",
+              id: message.id,
+              ok: true,
+              result: { port: 19783, host: "127.0.0.1" },
+            });
+          }
+        });
+      });
+      await new Promise((resolve) => rawServer.listen(endpoint, resolve));
+      client = new MultiplexerDaemonClient({
+        daemonManager: {
+          async ensureDaemon() {
+            ensureCalls++;
+          },
+          setDaemonClient() {},
+        },
+        controlEndpoint: endpoint,
+      });
+
+      try {
+        const call = client.call("startWSServer", {}, ensureDaemon);
+        const calls = ensureDaemon
+          ? [call, client.call("startWSServer", {})]
+          : [call];
+        await Promise.all(
+          calls.map((pending) =>
+            assert.rejects(
+              pending,
+              /Timed out waiting for multiplexer register response/
+            )
+          )
+        );
+        assert.strictEqual(registerCount, 1);
+        assert.strictEqual(client.status, "disconnected");
+        assert.strictEqual(client.connectPromise, null);
+        assert.strictEqual(client.controlTransport, null);
+        assert.strictEqual(client.pendingRpc.size, 0);
+
+        replyToRegister = true;
+        const expected = { port: 19783, host: "127.0.0.1" };
+        assert.deepStrictEqual(
+          await client.call("startWSServer", {}, ensureDaemon),
+          expected
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        assert.strictEqual(client.status, "connected");
+        assert.deepStrictEqual(
+          await client.call("startWSServer", {}, ensureDaemon),
+          expected
+        );
+        assert.strictEqual(registerCount, 2);
+        assert.strictEqual(ensureCalls, ensureDaemon ? 2 : 0);
+      } finally {
+        await client.close();
+        for (const transport of transports) {
+          transport.destroy();
+        }
+        await new Promise((resolve) => rawServer.close(resolve));
+      }
+    });
+  }
+
   it("rejects an invalid Register response", async function () {
     const rawServer = net.createServer((socket) => {
       const transport = new MultiplexerControlTransport(socket);

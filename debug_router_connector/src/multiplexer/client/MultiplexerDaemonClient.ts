@@ -26,6 +26,7 @@ import { MultiplexerControlTransport } from "../transport/MultiplexerControlTran
 import type { MultiplexerDaemonManager } from "./MultiplexerDaemonManager";
 
 export const DEFAULT_MULTIPLEXER_RPC_TIMEOUT = 5000;
+const MULTIPLEXER_CONNECT_TIMEOUT = 1000;
 const RPC_TIMEOUT_BUFFER_MS = 1000;
 const UNKNOWN_CONTROL_MESSAGE_PREVIEW_LIMIT = 500;
 
@@ -234,6 +235,7 @@ export class MultiplexerDaemonClient {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const cleanupHandshake = () => {
+        clearTimeout(timer);
         unsubscribeConnect();
         unsubscribeMessage();
         unsubscribeClose();
@@ -291,6 +293,9 @@ export class MultiplexerDaemonClient {
             new Error("Multiplexer control socket closed before register"),
         );
       });
+      const timer = setTimeout(() => {
+        fail(new Error("Timed out waiting for multiplexer register response"));
+      }, MULTIPLEXER_CONNECT_TIMEOUT);
 
       const unsubscribeConnect = transport.onConnect(onConnect);
     });
