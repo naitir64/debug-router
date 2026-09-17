@@ -170,6 +170,34 @@ describe("MultiplexerControlServer", function () {
     assert.deepStrictEqual(disconnected, [1]);
   });
 
+  it("closes the provisional connection when sending Health response fails", async function () {
+    const originalSend = MultiplexerControlTransport.prototype.send;
+    let sendAttempted = false;
+    MultiplexerControlTransport.prototype.send = function (message) {
+      if (message?.kind === "health-response") {
+        sendAttempted = true;
+        throw new Error("health response send failed");
+      }
+      return originalSend.call(this, message);
+    };
+
+    try {
+      await server.start();
+      const transport = await connectTransport(endpoint);
+      const closed = new Promise((resolve) => transport.onClose(resolve));
+      transport.send({ kind: "health" });
+      await closed;
+      await waitForProvisionalTransportsToBeRemoved(server);
+
+      assert.strictEqual(sendAttempted, true);
+      assert.deepStrictEqual(connected, []);
+      assert.strictEqual(server.connections.size, 0);
+      assert.strictEqual(server.provisionalTransports.size, 0);
+    } finally {
+      MultiplexerControlTransport.prototype.send = originalSend;
+    }
+  });
+
   it("does not register when sending Register response fails", async function () {
     const originalSend = MultiplexerControlTransport.prototype.send;
     const originalRegisterConnection = server.registerConnection;
@@ -269,6 +297,47 @@ describe("MultiplexerControlServer", function () {
     assert.strictEqual(server.connections.size, 0);
     assert.strictEqual(server.provisionalTransports.size, 0);
   });
+
+  for (const code of ["invalid-control-handshake", "control-handshake-timeout"]) {
+    it(`cleans up when sending ${code} fails`, async function () {
+      const originalSend = MultiplexerControlTransport.prototype.send;
+      let sendAttempted = false;
+      MultiplexerControlTransport.prototype.send = function (message) {
+        if (
+          message?.kind === "handshake-error-response" &&
+          message.error.code === code
+        ) {
+          sendAttempted = true;
+          throw new Error("handshake error response send failed");
+        }
+        return originalSend.call(this, message);
+      };
+
+      try {
+        server = new MultiplexerControlServer({
+          controlEndpoint: endpoint,
+          protocolVersion: 2,
+          handshakeTimeoutMs: 20,
+          host,
+        });
+        await server.start();
+        const transport = await connectTransport(endpoint);
+        const closed = new Promise((resolve) => transport.onClose(resolve));
+        if (code === "invalid-control-handshake") {
+          transport.send({ kind: "invalid" });
+        }
+        await closed;
+        await waitForProvisionalTransportsToBeRemoved(server);
+
+        assert.strictEqual(sendAttempted, true);
+        assert.deepStrictEqual(connected, []);
+        assert.strictEqual(server.connections.size, 0);
+        assert.strictEqual(server.provisionalTransports.size, 0);
+      } finally {
+        MultiplexerControlTransport.prototype.send = originalSend;
+      }
+    });
+  }
 
   it("cancels the handshake timeout after receiving Register", async function () {
     server = new MultiplexerControlServer({
