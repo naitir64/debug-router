@@ -31,6 +31,12 @@ const RPC_TIMEOUT_BUFFER_MS = 1000;
 const UNKNOWN_CONTROL_MESSAGE_PREVIEW_LIMIT = 500;
 
 export type MultiplexerDaemonClientOption = {
+  /**
+   * daemonManager: Manages daemon startup and readiness before connecting.
+   * controlEndpoint: Unix domain socket path or Windows named pipe for control connections.
+   * rpcTimeout: Default RPC response timeout in milliseconds; defaults to 5000.
+   * debugInfo: Optional diagnostic metadata attached to registration and RPC messages.
+   */
   daemonManager: MultiplexerDaemonManager;
   controlEndpoint: string;
   rpcTimeout?: number;
@@ -94,7 +100,14 @@ export class MultiplexerDaemonClient {
     params: ControlRpcParams[M],
     ensureDaemon: boolean = true,
   ): Promise<ControlRpcResult[M]> {
+    // Sends a function call to the Host for execution via RPC.
     this.assertValidRpcParams(method, params);
+
+    /**
+     * Set ensureDaemon to false only when sending a shutdown RPC.
+     * Daemon startup may need to shut down an existing daemon; ensuring the daemon
+     * again for that RPC would re-enter the startup flow and cause infinite recursion.
+     */
     if (ensureDaemon) {
       await this.connect();
     } else if (this.status !== "connected") {
@@ -113,6 +126,7 @@ export class MultiplexerDaemonClient {
   }
 
   async connect(): Promise<void> {
+    // Connects to the daemon if not already connected.
     if (this.status === "connected") {
       return;
     }
@@ -146,6 +160,11 @@ export class MultiplexerDaemonClient {
     };
 
     return new Promise<ControlRpcResult[M]>((resolve, reject) => {
+      /**
+       * Reject the RPC and remove its pending entry if no response arrives in time.
+       * Use getRpcTimeout to determine the wait time: 5000ms by default,
+       * extended when the RPC params specify a longer timeout.
+       */
       const timer = setTimeout(() => {
         this.pendingRpc.delete(id);
         reject(
@@ -159,14 +178,14 @@ export class MultiplexerDaemonClient {
         timer,
       });
 
-      try {
-        transport.send(request);
-      } catch (error) {
+      if (!transport.send(request)) {
         const pending = this.pendingRpc.get(id);
         if (pending) {
           this.pendingRpc.delete(id);
           clearTimeout(pending.timer);
-          pending.reject(asError(error));
+          pending.reject(
+            new Error(`Failed to send multiplexer RPC ${method} request`),
+          );
         }
       }
     });
@@ -205,6 +224,7 @@ export class MultiplexerDaemonClient {
   }
 
   private async connectInternal(ensureDaemon: boolean): Promise<void> {
+    // Close any existing control connection before creating a new one.
     if (this.controlTransport) {
       await this.closeSocket(
         new Error("Replacing multiplexer control socket"),
@@ -212,6 +232,8 @@ export class MultiplexerDaemonClient {
       );
     }
     this.status = "connecting";
+
+    // When ensureDaemon is true, start or reuse the daemon and wait until it is ready.
     if (ensureDaemon) {
       try {
         await this.daemonManager.ensureDaemon();
@@ -232,6 +254,7 @@ export class MultiplexerDaemonClient {
     }
     this.controlTransport = transport;
 
+    // Wait for the control connection to complete the registration handshake.
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const cleanupHandshake = () => {
@@ -240,6 +263,8 @@ export class MultiplexerDaemonClient {
         unsubscribeMessage();
         unsubscribeClose();
       };
+
+      // Clean up the connection when registration fails.
       const fail = (error: Error) => {
         if (settled) {
           return;
@@ -253,18 +278,20 @@ export class MultiplexerDaemonClient {
         transport.destroy(error);
         reject(error);
       };
+
+      // Send the register handshake message when the socket connects.
       const onConnect = () => {
         const debugInfo = this.createDebugInfo();
         const request: MultiplexerRegisterRequest = {
           kind: "register",
           ...(debugInfo ? { debugInfo } : {}),
         };
-        try {
-          transport.send(request);
-        } catch (error) {
-          fail(asError(error));
+        if (!transport.send(request) && !transport.closed) {
+          fail(new Error("Failed to send multiplexer register request"));
         }
       };
+
+      // Validate the register response, then switch to normal message handling.
       const unsubscribeMessage = transport.onMessage((message) => {
         if (isMultiplexerHandshakeErrorResponse(message)) {
           fail(createRpcError(message.error));
@@ -293,6 +320,8 @@ export class MultiplexerDaemonClient {
             new Error("Multiplexer control socket closed before register"),
         );
       });
+
+      // Set a timeout for the register response.
       const timer = setTimeout(() => {
         fail(new Error("Timed out waiting for multiplexer register response"));
       }, MULTIPLEXER_CONNECT_TIMEOUT);
@@ -309,6 +338,7 @@ export class MultiplexerDaemonClient {
   };
 
   private readonly handleTransportMessage = (value: unknown): void => {
+    // Dispatch incoming messages to RPC response or Host event handlers.
     if (isControlRpcResponse(value)) {
       this.handleRpcResponse(value);
       return;
@@ -323,6 +353,7 @@ export class MultiplexerDaemonClient {
   private handleRpcResponse(response: ControlRpcResponse): void {
     const responseId = response.id;
     const pending = this.pendingRpc.get(responseId);
+    // Ignore responses for requests that have already timed out or been cleared.
     if (!pending) {
       return;
     }
@@ -358,6 +389,8 @@ export class MultiplexerDaemonClient {
     error: Error,
     clearConnecting: boolean = true,
   ): Promise<void> {
+    // Reset connection state, remove listeners, reject pending RPCs,
+    // and close the control transport.
     const transport = this.controlTransport;
     this.controlTransport = null;
     this.status = "disconnected";
@@ -442,8 +475,4 @@ function createRpcError(error: ControlRpcError): Error {
   const rpcError = new Error(error.message);
   rpcError.name = error.code;
   return rpcError;
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }
