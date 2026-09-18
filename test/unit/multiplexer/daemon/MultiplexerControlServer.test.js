@@ -176,7 +176,8 @@ describe("MultiplexerControlServer", function () {
     MultiplexerControlTransport.prototype.send = function (message) {
       if (message?.kind === "health-response") {
         sendAttempted = true;
-        throw new Error("health response send failed");
+        this.destroy(new Error("health response send failed"));
+        return false;
       }
       return originalSend.call(this, message);
     };
@@ -209,7 +210,8 @@ describe("MultiplexerControlServer", function () {
     MultiplexerControlTransport.prototype.send = function (message) {
       if (message?.kind === "register-response") {
         resolveRegisterResponseSend();
-        throw new Error("register response send failed");
+        this.destroy(new Error("register response send failed"));
+        return false;
       }
       return originalSend.call(this, message);
     };
@@ -308,7 +310,8 @@ describe("MultiplexerControlServer", function () {
           message.error.code === code
         ) {
           sendAttempted = true;
-          throw new Error("handshake error response send failed");
+          this.destroy(new Error("handshake error response send failed"));
+          return false;
         }
         return originalSend.call(this, message);
       };
