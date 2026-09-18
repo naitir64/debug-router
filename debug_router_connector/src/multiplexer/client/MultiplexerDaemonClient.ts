@@ -159,14 +159,14 @@ export class MultiplexerDaemonClient {
         timer,
       });
 
-      try {
-        transport.send(request);
-      } catch (error) {
+      if (!transport.send(request)) {
         const pending = this.pendingRpc.get(id);
         if (pending) {
           this.pendingRpc.delete(id);
           clearTimeout(pending.timer);
-          pending.reject(asError(error));
+          pending.reject(
+            new Error(`Failed to send multiplexer RPC ${method} request`),
+          );
         }
       }
     });
@@ -259,10 +259,8 @@ export class MultiplexerDaemonClient {
           kind: "register",
           ...(debugInfo ? { debugInfo } : {}),
         };
-        try {
-          transport.send(request);
-        } catch (error) {
-          fail(asError(error));
+        if (!transport.send(request) && !transport.closed) {
+          fail(new Error("Failed to send multiplexer register request"));
         }
       };
       const unsubscribeMessage = transport.onMessage((message) => {
@@ -442,8 +440,4 @@ function createRpcError(error: ControlRpcError): Error {
   const rpcError = new Error(error.message);
   rpcError.name = error.code;
   return rpcError;
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

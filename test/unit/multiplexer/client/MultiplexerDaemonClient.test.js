@@ -108,6 +108,76 @@ describe("MultiplexerDaemonClient", function () {
     return { manager };
   }
 
+  it("rejects an invalid outgoing message immediately and keeps the connection usable", async function () {
+    await start({ rpcTimeout: 10000 });
+    await client.connect();
+    const transport = client.controlTransport;
+    const message = {};
+    message.self = message;
+
+    await assert.rejects(
+      client.call("sendMessageWithoutReply", {
+        target: "app",
+        clientId: 1,
+        message,
+      }),
+      /Failed to send multiplexer RPC sendMessageWithoutReply request/
+    );
+    assert.strictEqual(client.pendingRpc.size, 0);
+    assert.strictEqual(transport.closed, false);
+    assert.deepStrictEqual(await client.call("startWSServer", {}), {
+      port: 19783,
+      host: "127.0.0.1",
+    });
+    assert.strictEqual(client.controlTransport, transport);
+  });
+
+  it("rejects the failed send immediately and closes other pending RPCs", async function () {
+    await start({
+      rpcTimeout: 10000,
+      handleControlRpc: () => new Promise(() => {}),
+    });
+    await client.connect();
+    const first = client.call("startWSServer", {});
+    const results = Promise.allSettled([first]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const transport = client.controlTransport;
+    const writeError = new Error("control socket write failed");
+    transport.socket.write = () => {
+      throw writeError;
+    };
+    const second = client.call("startWSServer", {});
+    await assert.rejects(second, /Failed to send multiplexer RPC startWSServer request/);
+    assert.strictEqual((await results)[0].reason, writeError);
+    assert.strictEqual(client.pendingRpc.size, 0);
+    assert.strictEqual(client.status, "disconnected");
+    assert.strictEqual(transport.closed, true);
+  });
+
+  it("rejects registration with the original fatal send error and allows retry", async function () {
+    await start();
+    const originalSend = MultiplexerControlTransport.prototype.send;
+    const writeError = new Error("register write failed");
+    MultiplexerControlTransport.prototype.send = function (message) {
+      if (message?.kind === "register") {
+        this.socket.write = () => {
+          throw writeError;
+        };
+      }
+      return originalSend.call(this, message);
+    };
+    try {
+      await assert.rejects(client.connect(), (error) => error === writeError);
+      assert.strictEqual(client.status, "disconnected");
+      assert.strictEqual(client.connectPromise, null);
+      assert.strictEqual(client.controlTransport, null);
+    } finally {
+      MultiplexerControlTransport.prototype.send = originalSend;
+    }
+    await client.connect();
+    assert.strictEqual(client.status, "connected");
+  });
+
   it("ensures, registers, receives the initial snapshot, and reuses the socket", async function () {
     await start();
     const events = [];

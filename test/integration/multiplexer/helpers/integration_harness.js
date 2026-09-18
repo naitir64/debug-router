@@ -395,9 +395,11 @@ async function getHealth(controlEndpoint) {
       finish(() => reject(new Error("Health probe timed out")));
     }, 1000);
 
-    const unsubscribeConnect = transport.onConnect(() =>
-      transport.send({ kind: "health" })
-    );
+    const unsubscribeConnect = transport.onConnect(() => {
+      if (!transport.send({ kind: "health" }) && !transport.closed) {
+        finish(() => reject(new Error("Failed to send Health request")));
+      }
+    });
   });
   return { statusCode: 200, body };
 }

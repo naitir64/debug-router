@@ -139,14 +139,7 @@ export class MultiplexerControlServer {
           isInUse: this.host.isInUse(),
           ...(debugInfo ? { debugInfo } : {}),
         };
-        try {
-          transport.send(response);
-        } catch (_error) {
-          transport.destroy(
-            _error instanceof Error ? _error : new Error(String(_error)),
-          );
-          return;
-        }
+        transport.send(response);
         void transport.end();
         return;
       }
@@ -156,12 +149,7 @@ export class MultiplexerControlServer {
           kind: "register-response",
           ok: true,
         };
-        try {
-          transport.send(response);
-        } catch (_error) {
-          transport.destroy(
-            _error instanceof Error ? _error : new Error(String(_error)),
-          );
+        if (!transport.send(response)) {
           return;
         }
         const connection = this.registerConnection(transport);
@@ -177,14 +165,7 @@ export class MultiplexerControlServer {
             "First control message must be a valid health or register request",
         },
       };
-      try {
-        transport.send(response);
-      } catch (_error) {
-        transport.destroy(
-          _error instanceof Error ? _error : new Error(String(_error)),
-        );
-        return;
-      }
+      transport.send(response);
       void transport.end();
     });
 
@@ -198,14 +179,7 @@ export class MultiplexerControlServer {
           message: "Timed out waiting for the first control message",
         },
       };
-      try {
-        transport.send(response);
-      } catch (_error) {
-        transport.destroy(
-          _error instanceof Error ? _error : new Error(String(_error)),
-        );
-        return;
-      }
+      transport.send(response);
       void transport.end();
     }, this.option.handshakeTimeoutMs ?? DEFAULT_CONTROL_HANDSHAKE_TIMEOUT_MS);
 
