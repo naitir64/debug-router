@@ -54,7 +54,9 @@ describe("multiplexer integration compatibility upgrade", function () {
     assert.strictEqual((await currentDiscovery(1)).pid, daemonV1.pid);
     assert.deepStrictEqual(daemonStartedPids(), [daemonV1.pid]);
 
-    await v1.client.close();
+    await v1.client.closeSocket(
+      new Error("Test control connection disconnected")
+    );
     await connectRuntime(v2.client);
     const daemonV2 = await currentDiscovery(2);
     assert.notStrictEqual(daemonV2.pid, daemonV1.pid);
@@ -75,8 +77,12 @@ describe("multiplexer integration compatibility upgrade", function () {
     );
     assert.strictEqual((await currentDiscovery(2)).pid, daemonV2.pid);
 
-    await v1.client.close();
-    await v2.client.close();
+    await v1.client.closeSocket(
+      new Error("Test control connection disconnected")
+    );
+    await v2.client.closeSocket(
+      new Error("Test control connection disconnected")
+    );
     await connectRuntime(v3.client);
     const daemonV3 = await currentDiscovery(3);
     assert.notStrictEqual(daemonV3.pid, daemonV2.pid);

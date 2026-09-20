@@ -72,6 +72,7 @@ function parseArgs(argv) {
     connectors: DEFAULT_CONNECTORS,
     frontends: DEFAULT_FRONTENDS,
     concurrency: DEFAULT_CONCURRENCY,
+    sendIntervalMs: null,
     messageCount: DEFAULT_MESSAGE_COUNT,
     rounds: DEFAULT_ROUNDS,
     deviceTimeout: DEFAULT_DEVICE_TIMEOUT,
@@ -121,6 +122,8 @@ function parseArgs(argv) {
       args.frontends = Number(readValue());
     } else if (arg === "--concurrency") {
       args.concurrency = Number(readValue());
+    } else if (arg === "--send-interval-ms") {
+      args.sendIntervalMs = Number(readValue());
     } else if (arg === "--message-count") {
       args.messageCount = Number(readValue());
     } else if (arg === "--rounds") {
@@ -177,6 +180,10 @@ function parseArgs(argv) {
   if (args.transport === "wifi" && !args.websocket) {
     throw new Error("--transport wifi requires WebSocket to be enabled");
   }
+  args.sendIntervalMs ??= args.transport === "wifi" ? 20 : 0;
+  if (!Number.isFinite(args.sendIntervalMs) || args.sendIntervalMs < 0) {
+    throw new Error("--send-interval-ms must be a non-negative number");
+  }
   for (const key of [
     "durationMs",
     "connectors",
@@ -226,6 +233,7 @@ Options:
   --connectors <n>                   default ${DEFAULT_CONNECTORS}
   --frontends <n>                    default ${DEFAULT_FRONTENDS}
   --concurrency <n>                  default ${DEFAULT_CONCURRENCY}
+  --send-interval-ms <ms>            default 20 for wifi, 0 for usb; 0 disables pacing
   --message-count <n>                default ${DEFAULT_MESSAGE_COUNT}
   --rounds <n>                       default ${DEFAULT_ROUNDS}
   --device-timeout <ms>              default ${DEFAULT_DEVICE_TIMEOUT}
@@ -261,6 +269,7 @@ function createReport(platform, args) {
     connectors: args.connectors,
     frontends: args.websocket ? args.frontends : 0,
     concurrency: args.concurrency,
+    sendIntervalMs: args.sendIntervalMs,
     messageCount: args.messageCount,
     rounds: args.rounds,
     websocketMessageType: args.websocketMessageType,
@@ -685,12 +694,19 @@ async function runStressRounds(context, state, args, report) {
       state.platform,
       `round ${round + 1}/${args.rounds}: ${
         tasks.length
-      } messages concurrency=${args.concurrency}`
+      } messages concurrency=${args.concurrency} sendIntervalMs=${
+        args.sendIntervalMs
+      }`
     );
 
-    await runWithConcurrency(tasks, args.concurrency, async (task) => {
-      await runMessageTask(task, args, report);
-    });
+    await runWithConcurrency(
+      tasks,
+      args.concurrency,
+      async (task) => {
+        await runMessageTask(task, args, report);
+      },
+      args.sendIntervalMs
+    );
     scheduled += tasks.length;
 
     if (args.churn && round < args.rounds - 1) {
@@ -1898,13 +1914,31 @@ function stringifyForLog(value) {
   }
 }
 
-async function runWithConcurrency(items, concurrency, task) {
+async function runWithConcurrency(
+  items,
+  concurrency,
+  task,
+  sendIntervalMs = 0
+) {
   let nextIndex = 0;
+  let lastStartedAt = 0;
+  let startGate = Promise.resolve();
   const workers = Array.from(
     { length: Math.min(concurrency, items.length) },
     async () => {
       while (nextIndex < items.length) {
         const item = items[nextIndex++];
+        if (sendIntervalMs > 0) {
+          // Share one pacing gate across workers to avoid bursts and catch-up sends.
+          startGate = startGate.then(async () => {
+            const waitMs = lastStartedAt + sendIntervalMs - Date.now();
+            if (waitMs > 0) {
+              await delay(waitMs);
+            }
+            lastStartedAt = Date.now();
+          });
+          await startGate;
+        }
         await task(item);
       }
     }
