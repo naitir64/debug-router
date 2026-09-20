@@ -78,6 +78,7 @@ export class MultiplexerDaemonClient {
   private unsubscribeTransportClose: (() => void) | undefined;
   private nextRpcId = 1;
   private connectPromise: Promise<void> | null = null;
+  private closed = false;
   private status: MultiplexerDaemonClientStatus = "disconnected";
 
   constructor(option: MultiplexerDaemonClientOption) {
@@ -144,6 +145,9 @@ export class MultiplexerDaemonClient {
     method: M,
     params: ControlRpcParams[M],
   ): Promise<ControlRpcResult[M]> {
+    if (this.closed) {
+      throw new Error("Multiplexer remote client closed");
+    }
     if (this.status !== "connected") {
       throw new Error("Multiplexer control socket is not connected");
     }
@@ -224,12 +228,12 @@ export class MultiplexerDaemonClient {
   }
 
   private async connectInternal(ensureDaemon: boolean): Promise<void> {
+    if (this.closed) {
+      throw new Error("Multiplexer remote client closed");
+    }
     // Close any existing control connection before creating a new one.
     if (this.controlTransport) {
-      await this.closeSocket(
-        new Error("Replacing multiplexer control socket"),
-        false,
-      );
+      await this.closeSocket(new Error("Replacing multiplexer control socket"));
     }
     this.status = "connecting";
 
@@ -243,6 +247,9 @@ export class MultiplexerDaemonClient {
       }
     }
 
+    if (this.closed) {
+      throw new Error("Multiplexer remote client closed");
+    }
     let transport: MultiplexerControlTransport;
     try {
       transport = new MultiplexerControlTransport(
@@ -333,7 +340,6 @@ export class MultiplexerDaemonClient {
   private readonly handleTransportClose = (error?: Error): void => {
     void this.closeSocket(
       error ?? new Error("Multiplexer control socket closed"),
-      false,
     );
   };
 
@@ -380,23 +386,19 @@ export class MultiplexerDaemonClient {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    this.connectPromise = null;
     await this.closeSocket(new Error("Multiplexer remote client closed"));
     this.eventListener = undefined;
     this.connectionEventListener = undefined;
   }
 
-  private async closeSocket(
-    error: Error,
-    clearConnecting: boolean = true,
-  ): Promise<void> {
+  private async closeSocket(error: Error): Promise<void> {
     // Reset connection state, remove listeners, reject pending RPCs,
     // and close the control transport.
     const transport = this.controlTransport;
     this.controlTransport = null;
     this.status = "disconnected";
-    if (clearConnecting) {
-      this.connectPromise = null;
-    }
     this.unsubscribeTransportMessage?.();
     this.unsubscribeTransportClose?.();
     this.unsubscribeTransportMessage = undefined;
