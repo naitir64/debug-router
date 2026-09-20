@@ -112,6 +112,75 @@ describe("MultiplexerDaemonClient", function () {
     return { manager };
   }
 
+  for (const startupFails of [false, true]) {
+    it(`stays closed when pending daemon startup ${startupFails ? "fails" : "completes"}`, async function () {
+      let finishStartup;
+      const startup = new Promise((resolve, reject) => {
+        finishStartup = startupFails ? () => reject(new Error("startup failed")) : resolve;
+      });
+      let rpcCalls = 0;
+      await start({ ensureDaemon: () => startup, handleControlRpc: () => { rpcCalls++; return {}; } });
+      const events = [];
+      client.subscribeConnectionEvent((event) => events.push(event));
+      const pending = client.call("startWSServer", {});
+      const rejection = assert.rejects(pending, startupFails ? /startup failed/ : /client closed/);
+      await client.close();
+      finishStartup();
+      await rejection;
+      assert.strictEqual(client.status, "disconnected");
+      assert.strictEqual(client.closed, true);
+      assert.strictEqual(client.controlTransport, null);
+      assert.strictEqual(client.connectPromise, null);
+      assert.strictEqual(rpcCalls, 0);
+      assert.deepStrictEqual(connectedIds, []);
+      assert.deepStrictEqual(events, []);
+      await assert.rejects(client.connect(), /client closed/);
+      await assert.rejects(client.call("startWSServer", {}), /client closed/);
+      await assert.rejects(client.call("shutdownDaemon", {}, false), /client closed/);
+      assert.strictEqual(ensureCalls, 1);
+    });
+  }
+
+  it("closes the transport and prevents RPCs after a late register response", async function () {
+    let rpcCalls = 0;
+    await start({ handleControlRpc: () => { rpcCalls++; return {}; } });
+    const originalSend = MultiplexerControlTransport.prototype.send;
+    let receivedRegister;
+    const registered = new Promise((resolve) => { receivedRegister = resolve; });
+    let serverTransport;
+    let registerResponse;
+    MultiplexerControlTransport.prototype.send = function (message) {
+      if (message.kind === "register-response") {
+        serverTransport = this;
+        registerResponse = message;
+        receivedRegister();
+        return true;
+      }
+      // Do not deliver a snapshot before the delayed register response.
+      if (message.kind === "event") return true;
+      return originalSend.call(this, message);
+    };
+    try {
+      const pending = client.call("startWSServer", {});
+      const rejection = assert.rejects(pending, /client closed/);
+      await registered;
+      const disconnected = new Promise((resolve) => serverTransport.onClose(resolve));
+      const onMessage = client.controlTransport.messageListener;
+      const closing = client.close();
+      onMessage(registerResponse);
+      await closing;
+      await rejection;
+      await disconnected;
+      assert.strictEqual(client.status, "disconnected");
+      assert.strictEqual(client.closed, true);
+      assert.strictEqual(client.controlTransport, null);
+      assert.strictEqual(server.connections.size, 0);
+      assert.strictEqual(rpcCalls, 0);
+    } finally {
+      MultiplexerControlTransport.prototype.send = originalSend;
+    }
+  });
+
   it("rejects an invalid outgoing message immediately and keeps the connection usable", async function () {
     await start({ rpcTimeout: 10000 });
     await client.connect();
@@ -217,6 +286,7 @@ describe("MultiplexerDaemonClient", function () {
 
     await client.close();
     assert.strictEqual(client.status, "disconnected");
+    assert.strictEqual(client.closed, true);
   });
 
   it("sends framed RPCs and resolves method-aware responses", async function () {
@@ -443,7 +513,7 @@ describe("MultiplexerDaemonClient", function () {
   it("advertises the report flag on every registration, including reconnect", async function () {
     await start({ reportServiceEnabled: true });
     await client.connect();
-    await client.close();
+    await client.closeSocket(new Error("Test control connection disconnected"));
     await client.connect();
     assert.deepStrictEqual(reportFlags, [true, true]);
     const report = {
