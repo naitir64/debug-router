@@ -627,7 +627,9 @@ async function runCompatibilityUpgradeFlow() {
       daemonV1.pid
     );
 
-    await v1.client.close();
+    await v1.client.closeSocket(
+      new Error("Test control connection disconnected")
+    );
     await connectRuntime(v2.client);
     const daemonV2 = await waitForDiscoveryProtocol(context, 2);
     assert.notStrictEqual(daemonV2.pid, daemonV1.pid);
@@ -652,8 +654,12 @@ async function runCompatibilityUpgradeFlow() {
       daemonV2.pid
     );
 
-    await v1.client.close();
-    await v2.client.close();
+    await v1.client.closeSocket(
+      new Error("Test control connection disconnected")
+    );
+    await v2.client.closeSocket(
+      new Error("Test control connection disconnected")
+    );
     await connectRuntime(v3.client);
     const daemonV3 = await waitForDiscoveryProtocol(context, 3);
     assert.notStrictEqual(daemonV3.pid, daemonV2.pid);
