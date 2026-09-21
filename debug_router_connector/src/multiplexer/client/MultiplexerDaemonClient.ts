@@ -27,6 +27,8 @@ import type { MultiplexerDaemonManager } from "./MultiplexerDaemonManager";
 
 export const DEFAULT_MULTIPLEXER_RPC_TIMEOUT = 5000;
 const MULTIPLEXER_CONNECT_TIMEOUT = 1000;
+const MULTIPLEXER_CONNECT_MAX_ATTEMPTS = 3;
+const MULTIPLEXER_CONNECT_RETRY_DELAY = 100;
 const RPC_TIMEOUT_BUFFER_MS = 1000;
 const UNKNOWN_CONTROL_MESSAGE_PREVIEW_LIMIT = 500;
 
@@ -114,7 +116,7 @@ export class MultiplexerDaemonClient {
      */
     if (ensureDaemon) {
       await this.connect();
-    } else if (this.status !== "connected") {
+    } else {
       await this.connectInternal(false);
     }
     return this.sendRpc(method, params);
@@ -138,6 +140,9 @@ export class MultiplexerDaemonClient {
       return this.connectPromise;
     }
 
+    if (this.closed) {
+      throw new Error("Multiplexer remote client closed");
+    }
     this.connectPromise = this.connectInternal(true).finally(() => {
       this.connectPromise = null;
     });
@@ -231,25 +236,59 @@ export class MultiplexerDaemonClient {
   }
 
   private async connectInternal(ensureDaemon: boolean): Promise<void> {
-    if (this.closed) {
-      throw new Error("Multiplexer remote client closed");
+    if (this.status === "connected") {
+      return;
     }
-    // Close any existing control connection before creating a new one.
-    if (this.controlTransport) {
-      await this.closeSocket(new Error("Replacing multiplexer control socket"));
-    }
-    this.status = "connecting";
 
-    // When ensureDaemon is true, start or reuse the daemon and wait until it is ready.
-    if (ensureDaemon) {
-      try {
-        await this.daemonManager.ensureDaemon();
-      } catch (error) {
-        this.status = "disconnected";
-        throw error;
+    try {
+      // Retry transient failures and recoverable internal errors.
+      for (
+        let attempt = 0;
+        attempt < MULTIPLEXER_CONNECT_MAX_ATTEMPTS;
+        attempt++
+      ) {
+        // Close any existing control connection before creating a new one.
+        if (this.controlTransport) {
+          await this.closeSocket(
+            new Error("Replacing multiplexer control socket"),
+          );
+        }
+        if (this.closed) {
+          throw new Error("Multiplexer remote client closed");
+        }
+        this.status = "connecting";
+
+        // Start or reuse the daemon before registration.
+        // Retry if ensureDaemon returns false; stop retrying if it throws an error.
+        if (ensureDaemon) {
+          if (!(await this.daemonManager.ensureDaemon())) {
+            continue;
+          }
+        }
+        try {
+          await this.registerTransport();
+          return;
+        } catch (error) {
+          defaultLogger.warn(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, MULTIPLEXER_CONNECT_RETRY_DELAY),
+        );
       }
+      throw new Error(
+        "Failed to connect to multiplexer daemon after multiple attempts",
+      );
+    } catch (error) {
+      this.status = "disconnected";
+      throw error;
     }
+  }
 
+  private async registerTransport(): Promise<void> {
+    // Opens a control connection and registers with the daemon.
     if (this.closed) {
       throw new Error("Multiplexer remote client closed");
     }

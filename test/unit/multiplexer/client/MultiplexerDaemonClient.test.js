@@ -86,12 +86,7 @@ describe("MultiplexerDaemonClient", function () {
         if (option.ensureDaemon) {
           return option.ensureDaemon();
         }
-        return {
-          kind: "health-response",
-          ok: true,
-          protocolVersion: 1,
-          isInUse: false,
-        };
+        return true;
       },
       setDaemonClient(value) {
         this.client = value;
@@ -111,6 +106,129 @@ describe("MultiplexerDaemonClient", function () {
     });
     return { manager };
   }
+
+  it("stops after three attempts when ensuring the daemon keeps returning false", async function () {
+    await start({ ensureDaemon: async () => false });
+    await assert.rejects(client.call("startWSServer", {}), /after multiple attempts/);
+    assert.strictEqual(ensureCalls, 3);
+    assert.strictEqual(client.status, "disconnected");
+    assert.strictEqual(client.connectPromise, null);
+    assert.strictEqual(client.controlTransport, null);
+    assert.deepStrictEqual(connectedIds, []);
+  });
+
+  for (const failures of [0, 1]) {
+    it(`does not retry ensureDaemon exceptions after ${failures} retryable failures`, async function () {
+      const error = new Error("daemon cannot be replaced");
+      await start({
+        async ensureDaemon() {
+          if (ensureCalls <= failures) return false;
+          throw error;
+        },
+      });
+      await assert.rejects(client.connect(), (value) => value === error);
+      assert.strictEqual(ensureCalls, failures + 1);
+      assert.strictEqual(client.status, "disconnected");
+      assert.strictEqual(client.connectPromise, null);
+      assert.deepStrictEqual(connectedIds, []);
+    });
+  }
+
+  it("shares startup and registration retries across concurrent RPCs", async function () {
+    let rpcCalls = 0;
+    await start({
+      ensureDaemon: async () => ensureCalls > 1,
+      handleControlRpc() {
+        rpcCalls++;
+        return { port: 19783, host: "127.0.0.1" };
+      },
+    });
+    const originalSend = MultiplexerControlTransport.prototype.send;
+    let failedTransport;
+    MultiplexerControlTransport.prototype.send = function (message) {
+      if (message.kind === "register" && !failedTransport) {
+        failedTransport = this;
+        this.destroy(new Error("daemon closed during registration"));
+        return false;
+      }
+      return originalSend.call(this, message);
+    };
+    const states = [];
+    client.subscribeConnectionEvent((event) => states.push(event.state));
+    try {
+      const expected = { port: 19783, host: "127.0.0.1" };
+      assert.deepStrictEqual(
+        await Promise.all([
+          client.call("startWSServer", {}),
+          client.call("startWSServer", {}),
+        ]),
+        [expected, expected]
+      );
+      assert.strictEqual(ensureCalls, 3);
+      assert.strictEqual(rpcCalls, 2);
+      assert.strictEqual(failedTransport.closed, true);
+      assert.strictEqual(client.status, "connected");
+      assert.strictEqual(client.connectPromise, null);
+      assert.strictEqual(client.pendingRpc.size, 0);
+      assert.deepStrictEqual(states, ["connected"]);
+    } finally {
+      MultiplexerControlTransport.prototype.send = originalSend;
+    }
+  });
+
+  it("ensures the daemon again after the control endpoint disappears", async function () {
+    await start({
+      async ensureDaemon() {
+        if (ensureCalls === 2) await server.start();
+        return true;
+      },
+    });
+    await server.stop();
+    assert.deepStrictEqual(await client.call("startWSServer", {}), {
+      port: 19783,
+      host: "127.0.0.1",
+    });
+    assert.strictEqual(ensureCalls, 2);
+    assert.strictEqual(client.status, "connected");
+  });
+
+  it("closes a shutdown connection before retrying daemon startup", async function () {
+    let shutdownTransport;
+    await start({
+      async ensureDaemon() {
+        if (ensureCalls === 1) {
+          await client.call("shutdownDaemon", { reason: "test" }, false);
+          shutdownTransport = client.controlTransport;
+          return false;
+        }
+        assert.strictEqual(shutdownTransport.closed, true);
+        return true;
+      },
+    });
+    assert.deepStrictEqual(await client.call("startWSServer", {}), {
+      port: 19783,
+      host: "127.0.0.1",
+    });
+    assert.strictEqual(ensureCalls, 2);
+    assert.strictEqual(server.connections.size, 1);
+  });
+
+  it("does not ensure or register again after closing during the retry delay", async function () {
+    await start();
+    client.registerTransport = async () => {
+      throw new Error("Test registration failure");
+    };
+    const pending = client.call("startWSServer", {});
+    const rejection = assert.rejects(pending, /client closed/);
+    await new Promise(setImmediate);
+    await client.close();
+    await rejection;
+    assert.strictEqual(ensureCalls, 1);
+    assert.strictEqual(client.status, "disconnected");
+    assert.strictEqual(client.connectPromise, null);
+    assert.strictEqual(client.controlTransport, null);
+    assert.deepStrictEqual(connectedIds, []);
+  });
 
   for (const startupFails of [false, true]) {
     it(`stays closed when pending daemon startup ${startupFails ? "fails" : "completes"}`, async function () {
@@ -134,7 +252,9 @@ describe("MultiplexerDaemonClient", function () {
       assert.strictEqual(rpcCalls, 0);
       assert.deepStrictEqual(connectedIds, []);
       assert.deepStrictEqual(events, []);
-      await assert.rejects(client.connect(), /client closed/);
+      const reconnect = client.connect();
+      assert.strictEqual(client.connectPromise, null);
+      await assert.rejects(reconnect, /client closed/);
       await assert.rejects(client.call("startWSServer", {}), /client closed/);
       await assert.rejects(client.call("shutdownDaemon", {}, false), /client closed/);
       assert.strictEqual(ensureCalls, 1);
@@ -227,7 +347,7 @@ describe("MultiplexerDaemonClient", function () {
     assert.strictEqual(transport.closed, true);
   });
 
-  it("rejects registration with the original fatal send error and allows retry", async function () {
+  it("rejects after repeated registration failures and allows retry", async function () {
     await start();
     const originalSend = MultiplexerControlTransport.prototype.send;
     const writeError = new Error("register write failed");
@@ -240,7 +360,8 @@ describe("MultiplexerDaemonClient", function () {
       return originalSend.call(this, message);
     };
     try {
-      await assert.rejects(client.connect(), (error) => error === writeError);
+      await assert.rejects(client.connect(), /after multiple attempts/);
+      assert.strictEqual(ensureCalls, 3);
       assert.strictEqual(client.status, "disconnected");
       assert.strictEqual(client.connectPromise, null);
       assert.strictEqual(client.controlTransport, null);
@@ -275,12 +396,7 @@ describe("MultiplexerDaemonClient", function () {
     const connecting = client.connect();
     assert.strictEqual(client.status, "connecting");
 
-    resolveEnsure({
-      kind: "health-response",
-      ok: true,
-      protocolVersion: 1,
-      isInUse: false,
-    });
+    resolveEnsure(true);
     await connecting;
     assert.strictEqual(client.status, "connected");
 
@@ -350,19 +466,25 @@ describe("MultiplexerDaemonClient", function () {
   });
 
   it("rejects pending RPCs when the control closes", async function () {
+    let rpcReceived;
+    const received = new Promise((resolve) => {
+      rpcReceived = resolve;
+    });
     await start({
       handleControlRpc() {
+        rpcReceived();
         return new Promise(() => {});
       },
       rpcTimeout: 1000,
     });
     const call = client.call("startWSServer", {});
     const rejection = assert.rejects(call, /socket/);
-    await new Promise((resolve) => setImmediate(resolve));
+    await received;
     await server.stop();
     server = null;
     await rejection;
     assert.strictEqual(client.pendingRpc.size, 0);
+    assert.strictEqual(ensureCalls, 1);
   });
 
   it("times out pending RPCs", async function () {
@@ -377,8 +499,8 @@ describe("MultiplexerDaemonClient", function () {
   });
 
   for (const ensureDaemon of [true, false]) {
-    it(`times out a silent Register, retries, and clears the successful handshake timer (ensureDaemon=${ensureDaemon})`, async function () {
-      this.timeout(5000);
+    it(`bounds silent Register attempts and clears the successful handshake timer (ensureDaemon=${ensureDaemon})`, async function () {
+      this.timeout(7000);
       let replyToRegister = false;
       let registerCount = 0;
       const transports = new Set();
@@ -407,6 +529,7 @@ describe("MultiplexerDaemonClient", function () {
         daemonManager: {
           async ensureDaemon() {
             ensureCalls++;
+            return true;
           },
           setDaemonClient() {},
         },
@@ -422,11 +545,12 @@ describe("MultiplexerDaemonClient", function () {
           calls.map((pending) =>
             assert.rejects(
               pending,
-              /Timed out waiting for multiplexer register response/
+              /after multiple attempts/
             )
           )
         );
-        assert.strictEqual(registerCount, 1);
+        const attempts = 3;
+        assert.strictEqual(registerCount, attempts);
         assert.strictEqual(client.status, "disconnected");
         assert.strictEqual(client.connectPromise, null);
         assert.strictEqual(client.controlTransport, null);
@@ -444,8 +568,8 @@ describe("MultiplexerDaemonClient", function () {
           await client.call("startWSServer", {}, ensureDaemon),
           expected
         );
-        assert.strictEqual(registerCount, 2);
-        assert.strictEqual(ensureCalls, ensureDaemon ? 2 : 0);
+        assert.strictEqual(registerCount, attempts + 1);
+        assert.strictEqual(ensureCalls, ensureDaemon ? attempts + 1 : 0);
       } finally {
         await client.close();
         for (const transport of transports) {
@@ -466,7 +590,7 @@ describe("MultiplexerDaemonClient", function () {
     await new Promise((resolve) => rawServer.listen(endpoint, resolve));
     const manager = {
       controlEndpoint: endpoint,
-      async ensureDaemon() {},
+      async ensureDaemon() { return true; },
       setDaemonClient() {},
       async stopDaemonForDebugging(_withRespawn = false) {},
     };
@@ -474,7 +598,7 @@ describe("MultiplexerDaemonClient", function () {
       daemonManager: manager,
       controlEndpoint: endpoint,
     });
-    await assert.rejects(() => client.connect(), /register response/);
+    await assert.rejects(() => client.connect(), /after multiple attempts/);
     assert.strictEqual(client.status, "disconnected");
     await new Promise((resolve) => rawServer.close(resolve));
   });

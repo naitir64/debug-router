@@ -32,6 +32,7 @@ export type MultiplexerDaemonReplaceReason =
   | "force-stop";
 
 export type SpawnedDaemonProcess = {
+  on(event: "error", listener: (error: Error) => void): void;
   unref(): void;
 };
 
@@ -178,14 +179,32 @@ export class MultiplexerDaemonManager {
     }
   }
 
-  async ensureDaemon(): Promise<void> {
+  async ensureDaemon(): Promise<boolean> {
+    /**
+     * Ensures a usable daemon is running by reusing, starting, or replacing it.
+     * Returns true when the daemon is ready, or false when the caller should retry.
+     * Throws on serious errors that should not be retried.
+     */
     if (this.enableDebugMode) {
-      return this.stopDaemonForDebugging(true);
+      await this.stopDaemonForDebugging(true);
+      return true;
     }
 
-    while (true) {
-      const validation = await this.probeDaemonHealthWithRetry();
-      if (await this.handleDiscoveryResult(validation)) return;
+    try {
+      while (true) {
+        const validation = await this.probeDaemonHealthWithRetry();
+        if (await this.handleDiscoveryResult(validation)) return true;
+      }
+    } catch (error) {
+      if (!isRetryableDaemonError(error)) {
+        throw error;
+      }
+      defaultLogger.warn(
+        `Failed to ensure multiplexer daemon; retry later: ${
+          asError(error).message
+        }`,
+      );
+      return false;
     }
   }
 
@@ -249,6 +268,11 @@ export class MultiplexerDaemonManager {
           : undefined,
       },
     );
+    child.on("error", (error) => {
+      defaultLogger.error(
+        `Failed to spawn multiplexer daemon: ${error.message}`,
+      );
+    });
     child.unref();
   }
 
@@ -277,7 +301,7 @@ export class MultiplexerDaemonManager {
       await this.sleepFor(this.readyPollInterval);
     }
 
-    throw new Error(
+    throw new RetryableDaemonError(
       `Timed out waiting for multiplexer daemon: ${formatValidation(
         lastValidation,
       )}${
@@ -349,7 +373,7 @@ export class MultiplexerDaemonManager {
     if (sigtermError) {
       throw asError(sigtermError);
     }
-    throw new Error(`Failed to stop multiplexer daemon ${pid}`);
+    throw new RetryableDaemonError(`Failed to stop multiplexer daemon ${pid}`);
   }
 
   private async forceStopDaemon(): Promise<void> {
@@ -609,4 +633,24 @@ function createDaemonReplacementRequiredError(
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+class RetryableDaemonError extends Error {}
+
+const RETRYABLE_SYSTEM_ERROR_CODES = new Set([
+  "EAGAIN",
+  "EBUSY",
+  "EINTR",
+  "EMFILE",
+  "ENFILE",
+  "ENOBUFS",
+  "ENOMEM",
+]);
+
+function isRetryableDaemonError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return (
+    error instanceof RetryableDaemonError ||
+    RETRYABLE_SYSTEM_ERROR_CODES.has(code ?? "")
+  );
 }
