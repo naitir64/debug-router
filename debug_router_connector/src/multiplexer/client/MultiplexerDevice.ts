@@ -7,8 +7,6 @@ import { defaultLogger } from "../../utils/logger";
 import type { DeviceSnapshot } from "../protocol";
 import type { MultiplexerDaemonClient } from "./MultiplexerDaemonClient";
 
-const DEFAULT_DEVICE_HOST = "127.0.0.1";
-
 export type MultiplexerDeviceOption = {
   snapshot: DeviceSnapshot;
   daemonClient: MultiplexerDaemonClient;
@@ -43,7 +41,7 @@ export class MultiplexerDevice {
   }
 
   get ports(): number[] {
-    return this.snapshot.ports ? [...this.snapshot.ports] : [];
+    return [...this.snapshot.ports];
   }
 
   get serial(): string {
@@ -55,7 +53,7 @@ export class MultiplexerDevice {
   }
 
   getHost(): string {
-    return this.snapshot.host ?? DEFAULT_DEVICE_HOST;
+    return this.snapshot.host;
   }
 
   startWatchClient(): void {
@@ -95,7 +93,7 @@ function cloneDeviceSnapshot(snapshot: DeviceSnapshot): DeviceSnapshot {
     os: snapshot.os,
     title: snapshot.title,
     serial: snapshot.serial,
-    ports: snapshot.ports ? [...snapshot.ports] : undefined,
+    ports: [...snapshot.ports],
     host: snapshot.host,
   };
 }

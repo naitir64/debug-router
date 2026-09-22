@@ -108,8 +108,8 @@ export function isDeviceSnapshot(value: unknown): value is DeviceSnapshot {
     isString(value.os) &&
     isString(value.title) &&
     isString(value.serial) &&
-    isOptional(value.ports, isNumberArray) &&
-    isOptional(value.host, isString)
+    isNumberArray(value.ports) &&
+    isString(value.host)
   );
 }
 
