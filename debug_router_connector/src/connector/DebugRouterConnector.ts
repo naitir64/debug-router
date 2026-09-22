@@ -407,10 +407,10 @@ export class DebugRouterConnector {
     this.emit("device-connected", device as any);
   }
 
-  unregisterDevice(serial: string, disconnect: boolean = false): void {
-    if (!disconnect) {
+  unregisterDevice(serial: string, force: boolean = false): void {
+    if (!force) {
       defaultLogger.warn(
-        "unregisterDevice is ignored unless disconnect is true; device ownership is shared by the daemon.",
+        "unregisterDevice is ignored unless force is true; device ownership is shared by the daemon.",
       );
       return;
     }
@@ -1041,7 +1041,7 @@ export class DebugRouterConnector {
 
   private unregisterDeviceInternal(
     serial: string,
-    disconnect: boolean,
+    force: boolean,
   ): void {
     const device = this.devices.get(serial);
     if (!device) {
@@ -1053,7 +1053,7 @@ export class DebugRouterConnector {
 
     defaultLogger.debug("unregisterDevice:" + serial);
     this.devices.delete(serial);
-    if (disconnect) {
+    if (force) {
       device.disConnect();
     }
     this.emit("device-disconnected", device as any);
