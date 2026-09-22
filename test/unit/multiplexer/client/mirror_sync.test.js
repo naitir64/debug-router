@@ -57,7 +57,7 @@ function createDeviceSnapshot(overrides = {}) {
     title: overrides.title ?? "Pixel",
     serial: overrides.serial ?? "device-1",
     ports: overrides.ports ?? [8901, 8902],
-    host: overrides.host,
+    host: overrides.host ?? "127.0.0.1",
   };
 }
 
