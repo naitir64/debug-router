@@ -2,11 +2,9 @@
 // Licensed under the Apache License Version 2.0 that can be found in the
 // LICENSE file in the root directory of this source tree.
 
-import { EventEmitter } from "events";
 import { Client } from "../../connector/Client";
 import { defaultLogger } from "../../utils/logger";
 import { RequireMessageType, SocketEvent } from "../../utils/type";
-import { WebSocketClient } from "../../websocket/WebSocketConnection";
 import type { WebSocketClientSnapshot } from "../protocol";
 import { MultiplexerDaemonClient } from "./MultiplexerDaemonClient";
 
@@ -15,12 +13,13 @@ export type MultiplexerWebSocketClientOption = {
   daemonClient: MultiplexerDaemonClient;
 };
 
-export class MultiplexerWebSocketClient extends WebSocketClient {
+export class MultiplexerWebSocketClient extends Client {
+  readonly info: WebSocketClientSnapshot;
   private readonly daemonClient: MultiplexerDaemonClient;
 
   constructor(option: MultiplexerWebSocketClientOption) {
-    const snapshot = cloneSnapshot(option.snapshot);
-    super({} as any, snapshot, new EventEmitter() as any);
+    super();
+    this.info = cloneSnapshot(option.snapshot);
     this.daemonClient = option.daemonClient;
   }
 

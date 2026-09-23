@@ -17,9 +17,6 @@ const {
 const {
   Client,
 } = require("../../../../debug_router_connector/dist/cjs/src/connector/Client");
-const {
-  WebSocketClient,
-} = require("../../../../debug_router_connector/dist/cjs/src/websocket/WebSocketConnection");
 
 function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
@@ -423,7 +420,7 @@ describe("multiplexer client mirror sync", function () {
     );
   });
 
-  it("builds a WebSocket client snapshot through parent info", function () {
+  it("builds a WebSocket client mirror from an isolated snapshot", function () {
     const daemonClient = createDaemonClient();
     const snapshot = createWebSocketClientSnapshot({
       rawInfo: { App: "Original" },
@@ -437,7 +434,6 @@ describe("multiplexer client mirror sync", function () {
     const info = client.info;
 
     assert.strictEqual(client instanceof Client, true);
-    assert.strictEqual(client instanceof WebSocketClient, true);
     assert.strictEqual(client.clientId(), 100);
     assert.strictEqual(client.type(), "runtime");
     assert.strictEqual(client.info, info);
