@@ -38,6 +38,7 @@ describe("multiplexer integration reconnect and snapshot", function () {
             os: "Android",
             title: "Old Device",
             ports: [9001],
+            host: "127.0.0.1",
           },
         ],
         clients: [

@@ -11,7 +11,7 @@ const { WebSocket } = require("ws");
 const {
   DebugRouterConnector,
   MultiOpenStatus,
-  WebSocketClient,
+  Client,
 } = require("@lynx-js/debug-router-connector");
 const {
   createMultiplexerPaths,
@@ -220,7 +220,7 @@ async function runPublicLifecycleCase() {
     const externalClient = connected.find(
       (client) => clientIdOf(client) === runtime.id
     );
-    assert.strictEqual(externalClient instanceof WebSocketClient, true);
+    assert.strictEqual(externalClient instanceof Client, true);
     assert.strictEqual(typeof externalClient.clientId, "function");
     assert.strictEqual(externalClient.clientId(), runtime.id);
     assert.strictEqual(externalClient.type(), "runtime");

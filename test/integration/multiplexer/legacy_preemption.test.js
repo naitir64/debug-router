@@ -151,6 +151,7 @@ describe("multiplexer integration legacy preemption", function () {
         os: "Android",
         title: "Preempted Device",
         ports: [9201],
+        host: "127.0.0.1",
       },
     });
     context.appendCommand({
