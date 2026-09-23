@@ -74,7 +74,7 @@ export class MultiplexerDevice {
     });
   }
 
-  disConnect(): void {
+  disconnect(): void {
     this.connected = false;
     void this.daemonClient
       .call("disconnectDevice", {

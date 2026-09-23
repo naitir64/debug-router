@@ -1024,7 +1024,7 @@ export class DebugRouterConnector {
     defaultLogger.debug("unregisterDevice:" + serial);
     this.devices.delete(serial);
     if (force) {
-      device.disConnect();
+      device.disconnect();
     }
     this.emit("device-disconnected", device as any);
   }
