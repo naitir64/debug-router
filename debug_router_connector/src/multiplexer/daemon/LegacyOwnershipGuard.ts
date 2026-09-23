@@ -31,7 +31,10 @@ export type LegacyOwnershipChange = {
 export type LegacyOwnershipGuardOption = {
   legacyDriverDir?: string;
   monitorInterval?: number;
-  onStatusChanged?: (change: LegacyOwnershipChange) => void;
+
+  // Host-provided callback for ownership changes.
+  // On ownership loss, the Host stops client watchers and closes USB client connections.
+  onStatusChanged: (change: LegacyOwnershipChange) => void;
 };
 
 /**
@@ -46,11 +49,11 @@ export class LegacyOwnershipGuard {
   private readonly driverDir: string;
   private readonly lockDir: string;
   private readonly monitorInterval: number;
-  private readonly onStatusChanged?: (change: LegacyOwnershipChange) => void;
+  private readonly onStatusChanged: (change: LegacyOwnershipChange) => void;
   private monitorTimer?: NodeJS.Timeout;
   private stopped = true;
 
-  constructor(option: LegacyOwnershipGuardOption = {}) {
+  constructor(option: LegacyOwnershipGuardOption) {
     this.driverDir = option.legacyDriverDir ?? driver_dir;
     this.lockDir = path.join(this.driverDir, path.basename(lockDir));
     this.monitorInterval =
@@ -60,6 +63,8 @@ export class LegacyOwnershipGuard {
   }
 
   async start(): Promise<void> {
+    // Coordinate device ownership with legacy Drivers through their shared owner file.
+    // Create the parent directory, attempt to claim ownership, then start the monitoring interval.
     if (process.env.DriverCloseMultiOpen === "true") {
       defaultLogger.warn(
         "Legacy ownership guard disabled by DriverCloseMultiOpen",
@@ -93,6 +98,8 @@ export class LegacyOwnershipGuard {
   }
 
   async reacquire(): Promise<boolean> {
+    // Public entry point for explicitly reclaiming legacy ownership.
+    // Called only by Host.startWatchAllClients().
     if (process.env.DriverCloseMultiOpen === "true") {
       return true;
     }
@@ -105,6 +112,14 @@ export class LegacyOwnershipGuard {
       return;
     }
     await this.withLegacyLock(() => {
+      /**
+       * Check legacy ownership under the shared lock:
+       * - Our PID: restore attached status and notify the Host if needed.
+       * - Missing or invalid PID: claim ownership.
+       * - Dead PID: reclaim ownership from the exited process.
+       * - Another live PID: if currently attached, mark unattached and notify the Host.
+       *   Do not preempt a live owner; explicit reclamation goes through reacquire().
+       */
       const previousOwnerPid = this.readOwnerPid();
 
       if (previousOwnerPid === process.pid) {
@@ -137,6 +152,7 @@ export class LegacyOwnershipGuard {
   }
 
   private claim(reason: LegacyOwnershipReason): Promise<boolean> {
+    // Claim legacy ownership by writing the daemon PID to the owner file under the shared lock.
     return this.withLegacyLock(() => {
       const previousOwnerPid = this.readOwnerPid();
       this.writeOwnerPid(reason, previousOwnerPid ?? undefined);
@@ -185,7 +201,7 @@ export class LegacyOwnershipGuard {
     reason: LegacyOwnershipReason,
     previousOwnerPid?: number,
   ): void {
-    this.onStatusChanged?.({
+    this.onStatusChanged({
       status,
       ownerPid: process.pid,
       previousOwnerPid,
@@ -194,6 +210,7 @@ export class LegacyOwnershipGuard {
   }
 
   private async withLegacyLock(work: () => void): Promise<boolean> {
+    // Run ownership updates under the lock shared with legacy Drivers.
     let acquiredLock = false;
     try {
       await this.acquireLegacyLock();
@@ -217,6 +234,8 @@ export class LegacyOwnershipGuard {
   }
 
   private async acquireLegacyLock(): Promise<void> {
+    // Acquire the legacy directory lock with brief retries.
+    // If it remains held, remove the lock directory and recreate it.
     for (
       let attempt = 0;
       attempt < LEGACY_LOCK_ACQUIRE_MAX_ATTEMPTS;
