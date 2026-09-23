@@ -83,6 +83,7 @@ describe("LegacyOwnershipGuard", function () {
     fs.mkdirSync(explicitDriverDir, { recursive: true });
     const guard = new LegacyOwnershipGuard({
       legacyDriverDir: explicitDriverDir,
+      onStatusChanged: () => {},
     });
 
     assert.strictEqual(await guard.reacquire(), true);
@@ -102,7 +103,9 @@ describe("LegacyOwnershipGuard", function () {
 
   it("retries lock acquisition until the legacy lock holder releases", async function () {
     fs.mkdirSync(lockDir, { recursive: true });
-    const guard = new LegacyOwnershipGuard();
+    const guard = new LegacyOwnershipGuard({
+      onStatusChanged: () => {},
+    });
     setTimeout(() => fs.rmdirSync(lockDir), 20);
 
     assert.strictEqual(await guard.reacquire(), true);
@@ -116,7 +119,9 @@ describe("LegacyOwnershipGuard", function () {
 
   it("removes a legacy lock that remains held after all attempts", async function () {
     fs.mkdirSync(lockDir, { recursive: true });
-    const guard = new LegacyOwnershipGuard();
+    const guard = new LegacyOwnershipGuard({
+      onStatusChanged: () => {},
+    });
 
     assert.strictEqual(await guard.reacquire(), true);
 
@@ -129,7 +134,9 @@ describe("LegacyOwnershipGuard", function () {
 
   it("does not start monitoring after being stopped while acquiring the lock", async function () {
     fs.mkdirSync(lockDir, { recursive: true });
-    const guard = new LegacyOwnershipGuard();
+    const guard = new LegacyOwnershipGuard({
+      onStatusChanged: () => {},
+    });
 
     const startPromise = guard.start();
     guard.stop();
@@ -144,6 +151,7 @@ describe("LegacyOwnershipGuard", function () {
     const explicitDriverDir = path.join(tempDir, "start-driver");
     const guard = new LegacyOwnershipGuard({
       legacyDriverDir: explicitDriverDir,
+      onStatusChanged: () => {},
     });
 
     await guard.start();
