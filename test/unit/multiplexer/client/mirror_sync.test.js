@@ -154,7 +154,7 @@ describe("multiplexer client mirror sync", function () {
 
     device.startWatchClient();
     await device.stopWatchClient();
-    device.disConnect();
+    device.disconnect();
     await nextTick();
 
     assert.strictEqual(device.isConnected, false);
@@ -190,7 +190,7 @@ describe("multiplexer client mirror sync", function () {
     );
 
     assert.doesNotThrow(() => device.startWatchClient());
-    assert.doesNotThrow(() => device.disConnect());
+    assert.doesNotThrow(() => device.disconnect());
     await nextTick();
 
     assert.deepStrictEqual(
