@@ -7,11 +7,19 @@ import { SocketEvent } from "../../utils/type";
 export const DEFAULT_MEMOIZED_QUERY_TTL_MS = 1000;
 
 export type MemoizedQueryDefinition = {
+  // Maps a query request type to its corresponding notification type.
   requestType: string;
   notificationType: string;
 };
 
 export type MemoizedQueryDecision =
+  /**
+   * Describes how to handle a query based on its cache and pending state.
+   * - not-memoized: Use normal routing without memoization.
+   * - forward: Send the query to the target client.
+   * - pending: Skip forwarding while an equivalent query is pending.
+   * - cached: Reuse the cached notification without sending a new query.
+   */
   | {
       action: "not-memoized";
     }
@@ -31,7 +39,6 @@ export type MemoizedQueryDecision =
 export type MemoizedQueryTableOption = {
   definitions?: readonly MemoizedQueryDefinition[];
   validityPeriodMs?: number;
-  now?: () => number;
 };
 
 type MemoizedNotification = {
@@ -42,7 +49,7 @@ type MemoizedNotification = {
 
 type PendingQuery = {
   sentAt: number;
-  timer?: ReturnType<typeof setTimeout>;
+  timer?: NodeJS.Timeout;
 };
 
 const DEFAULT_QUERY_DEFINITIONS: readonly MemoizedQueryDefinition[] = [
@@ -53,26 +60,37 @@ const DEFAULT_QUERY_DEFINITIONS: readonly MemoizedQueryDefinition[] = [
 ];
 
 export class MemoizedQueryTable {
+  // Coalesces pending queries per client and reuses cached notifications within a validity period.
+
+  // Maps memoized request types to their corresponding notification types.
   private readonly definitions: readonly MemoizedQueryDefinition[];
+
+  // Stores cached notifications by client ID and notification type.
   private readonly notifications = new Map<
     number,
     Map<string, MemoizedNotification>
   >();
+
+  // Tracks pending queries and retry timers by client ID and request type.
   private readonly pendingQueries = new Map<
     number,
     Map<string, PendingQuery>
   >();
+
+  // Sets the validity period for cached and pending results, and the retry interval.
   private readonly validityPeriodMs: number;
-  private readonly now: () => number;
 
   constructor(option: MemoizedQueryTableOption = {}) {
     this.validityPeriodMs =
       option.validityPeriodMs ?? DEFAULT_MEMOIZED_QUERY_TTL_MS;
-    this.now = option.now ?? Date.now;
     this.definitions = option.definitions ?? DEFAULT_QUERY_DEFINITIONS;
   }
 
   query(clientId: number, message: unknown): MemoizedQueryDecision {
+    /**
+     * Determines whether to bypass memoization, reuse a fresh cached notification,
+     * skip a duplicate pending query, or mark a new query as pending for forwarding.
+     */
     const requestType = getCustomizedType(message);
     const notificationType = this.definitions.find(
       (definition) => definition.requestType === requestType,
@@ -110,6 +128,7 @@ export class MemoizedQueryTable {
     message: string,
     parsedValue: unknown,
   ): void {
+    // Caches a recognized notification and clears the corresponding pending query.
     const notificationType = getCustomizedType(parsedValue);
     const requestType = this.definitions.find(
       (definition) => definition.notificationType === notificationType,
@@ -126,7 +145,7 @@ export class MemoizedQueryTable {
     clientNotifications.set(notificationType, {
       message,
       parsedValue,
-      receivedAt: this.now(),
+      receivedAt: Date.now(),
     });
     this.clearPending(clientId, requestType);
   }
@@ -140,6 +159,7 @@ export class MemoizedQueryTable {
     requestType: string,
     retry: () => boolean,
   ): void {
+    // Schedules retries for a pending query until its notification arrives or a retry fails.
     const pendingQuery = this.pendingQueries.get(clientId)!.get(requestType)!;
     pendingQuery.timer = this.createRetryTimer(
       clientId,
@@ -170,23 +190,25 @@ export class MemoizedQueryTable {
     clientId: number,
     notificationType: string,
   ): MemoizedNotification | null {
+    // Returns the cached notification if it is still valid, or null otherwise.
     const notification =
       this.notifications.get(clientId)?.get(notificationType) ?? null;
     if (!notification) {
       return null;
     }
-    if (this.now() - notification.receivedAt > this.validityPeriodMs) {
+    if (Date.now() - notification.receivedAt > this.validityPeriodMs) {
       return null;
     }
     return notification;
   }
 
   private isPending(clientId: number, requestType: string): boolean {
+    // Returns true if a query is pending for forwarding, or false otherwise.
     const pendingQuery = this.pendingQueries.get(clientId)?.get(requestType);
     if (!pendingQuery) {
       return false;
     }
-    if (this.now() - pendingQuery.sentAt > this.validityPeriodMs) {
+    if (Date.now() - pendingQuery.sentAt > this.validityPeriodMs) {
       // The pending query has expired and can no longer be reused.
       this.clearPending(clientId, requestType);
       return false;
@@ -196,17 +218,19 @@ export class MemoizedQueryTable {
   }
 
   private markPending(clientId: number, requestType: string): void {
+    // Marks a query as pending for forwarding.
     let clientPendingQueries = this.pendingQueries.get(clientId);
     if (!clientPendingQueries) {
       clientPendingQueries = new Map<string, PendingQuery>();
       this.pendingQueries.set(clientId, clientPendingQueries);
     }
     clientPendingQueries.set(requestType, {
-      sentAt: this.now(),
+      sentAt: Date.now(),
     });
   }
 
   private clearPending(clientId: number, requestType: string): void {
+    // Clears a pending query and its retry timer.
     const clientPendingQueries = this.pendingQueries.get(clientId);
     if (!clientPendingQueries) {
       return;
@@ -227,9 +251,10 @@ export class MemoizedQueryTable {
     requestType: string,
     pendingQuery: PendingQuery,
     retry: () => boolean,
-  ): ReturnType<typeof setTimeout> {
+  ): NodeJS.Timeout {
+    // Creates a retry timer that reschedules on success and clears the pending query on failure.
     const timer = setTimeout(() => {
-      pendingQuery.sentAt = this.now();
+      pendingQuery.sentAt = Date.now();
       if (!retry()) {
         this.clearPending(clientId, requestType);
         return;
