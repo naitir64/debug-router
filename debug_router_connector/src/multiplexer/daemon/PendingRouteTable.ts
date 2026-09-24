@@ -4,64 +4,68 @@
 
 export const DEFAULT_PENDING_ROUTE_TIMEOUT_MS = 5000;
 
-export type PendingRoute = {
+export type PendingRouteInput = {
   kind: "control" | "websocket";
-  globalMessageId: number;
   requesterId: number;
   originalId: number;
   clientId: number;
-  createdAt: number;
-  timer: ReturnType<typeof setTimeout>;
   resolve?: (value: unknown) => void;
   reject?: (error: Error) => void;
 };
 
+export type PendingRoute = PendingRouteInput & {
+  globalMessageId: number;
+  createdAt: number;
+  timer: NodeJS.Timeout;
+};
+
 export type PendingRouteTableOption = {
   timeoutMs?: number;
-  now?: () => number;
-  onTimeout?: (route: PendingRoute) => void;
-  setTimeout?: (
-    callback: () => void,
-    timeoutMs: number,
-  ) => ReturnType<typeof setTimeout>;
-  clearTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
 };
 
 export class PendingRouteTable {
+  /**
+   * Tracks pending requests with global message IDs, preserving the requester,
+   * original message ID, and target client for response routing.
+   * Supports timeout cleanup and bulk removal by requester or target client.
+   */
   private readonly routes = new Map<number, PendingRoute>();
   private nextGlobalMessageId = 1;
   private readonly timeoutMs: number;
-  private readonly now: () => number;
-  private readonly onTimeout?: (route: PendingRoute) => void;
-  private readonly setTimeoutFn: (
-    callback: () => void,
-    timeoutMs: number,
-  ) => ReturnType<typeof setTimeout>;
-  private readonly clearTimeoutFn: (
-    timer: ReturnType<typeof setTimeout>,
-  ) => void;
 
   constructor(option: PendingRouteTableOption = {}) {
     this.timeoutMs = option.timeoutMs ?? DEFAULT_PENDING_ROUTE_TIMEOUT_MS;
-    this.now = option.now ?? Date.now;
-    this.onTimeout = option.onTimeout;
-    this.setTimeoutFn = option.setTimeout ?? setTimeout;
-    this.clearTimeoutFn = option.clearTimeout ?? clearTimeout;
   }
 
-  add(
-    input: Omit<PendingRoute, "globalMessageId" | "createdAt" | "timer">,
-  ): PendingRoute {
+  add(input: PendingRouteInput): PendingRoute {
     const globalMessageId = this.createGlobalMessageId();
     const route: PendingRoute = {
       ...input,
       globalMessageId,
-      createdAt: this.now(),
+      createdAt: Date.now(),
       timer: this.createTimer(globalMessageId),
     };
 
     this.routes.set(globalMessageId, route);
     return route;
+  }
+
+  private createTimer(globalMessageId: number): NodeJS.Timeout {
+    // Creates a timer that removes the route on timeout and rejects control requests.
+    return setTimeout(() => {
+      const route = this.remove(globalMessageId, false);
+      if (!route) {
+        return;
+      }
+
+      if (route.kind === "control") {
+        route.reject?.(
+          new Error(
+            `Timed out waiting for response to global message id ${globalMessageId}`,
+          ),
+        );
+      }
+    }, this.timeoutMs);
   }
 
   get(globalMessageId: number): PendingRoute | null {
@@ -96,24 +100,6 @@ export class PendingRouteTable {
     return this.nextGlobalMessageId++;
   }
 
-  private createTimer(globalMessageId: number): ReturnType<typeof setTimeout> {
-    return this.setTimeoutFn(() => {
-      const route = this.remove(globalMessageId, false);
-      if (!route) {
-        return;
-      }
-
-      if (route.kind === "control") {
-        route.reject?.(
-          new Error(
-            `Timed out waiting for response to global message id ${globalMessageId}`,
-          ),
-        );
-      }
-      this.onTimeout?.(route);
-    }, this.timeoutMs);
-  }
-
   private remove(
     globalMessageId: number,
     shouldClearTimer: boolean,
@@ -125,7 +111,7 @@ export class PendingRouteTable {
 
     this.routes.delete(globalMessageId);
     if (shouldClearTimer) {
-      this.clearTimeoutFn(route.timer);
+      clearTimeout(route.timer);
     }
     return route;
   }

@@ -59,10 +59,16 @@ function createTimers() {
 describe("MemoizedQueryTable", function () {
   const originalSetTimeout = global.setTimeout;
   const originalClearTimeout = global.clearTimeout;
+  let originalNow;
+
+  beforeEach(function () {
+    originalNow = Date.now;
+  });
 
   afterEach(function () {
     global.setTimeout = originalSetTimeout;
     global.clearTimeout = originalClearTimeout;
+    Date.now = originalNow;
   });
 
   function useTimers(timers) {
@@ -72,9 +78,9 @@ describe("MemoizedQueryTable", function () {
 
   it("coalesces ListSession and returns the recorded SessionList while fresh", function () {
     let now = 100;
+    Date.now = () => now;
     const table = new MemoizedQueryTable({
       validityPeriodMs: 50,
-      now: () => now,
     });
     const query = createCustomizedMessage("ListSession");
     const notification = createNotification("SessionList", [
@@ -103,9 +109,9 @@ describe("MemoizedQueryTable", function () {
 
   it("allows retry after pending and cached entries become stale", function () {
     let now = 200;
+    Date.now = () => now;
     const table = new MemoizedQueryTable({
       validityPeriodMs: 10,
-      now: () => now,
     });
     const query = createCustomizedMessage("ListSession");
 
@@ -125,11 +131,11 @@ describe("MemoizedQueryTable", function () {
 
   it("retries a pending query until its notification is recorded", function () {
     let now = 300;
+    Date.now = () => now;
     const timers = createTimers();
     useTimers(timers);
     const table = new MemoizedQueryTable({
       validityPeriodMs: 10,
-      now: () => now,
     });
     const query = createCustomizedMessage("ListSession");
     const retryCalls = [];
@@ -279,9 +285,8 @@ describe("MemoizedQueryTable", function () {
 
   it("uses the default TTL when it is omitted", function () {
     let now = 1000;
-    const table = new MemoizedQueryTable({
-      now: () => now,
-    });
+    Date.now = () => now;
+    const table = new MemoizedQueryTable();
     const query = createCustomizedMessage("ListSession");
     const notification = createNotification("SessionList");
     recordNotification(table, 1, notification);
