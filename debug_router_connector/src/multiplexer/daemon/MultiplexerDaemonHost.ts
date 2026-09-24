@@ -48,6 +48,13 @@ import {
 const DEFAULT_DEV_SERVE_PORT = 19783;
 
 export type PendingTargetSeed = {
+  /**
+   * Requester and target information:
+   * - kind: Request source, either a control connection or a WebSocket frontend.
+   * - requesterId: Control connection ID or frontend WebSocket client ID, depending on kind.
+   * - clientId: Target runtime client ID (USB or WebSocket App).
+   * - resolve/reject: Optional daemon-side Promise callbacks for control requests awaiting a reply.
+   */
   kind: "control" | "websocket";
   requesterId: number;
   clientId: number;
@@ -55,12 +62,14 @@ export type PendingTargetSeed = {
   reject?: (error: Error) => void;
 };
 
+// Represents a runtime response matched to its pending route for delivery to the requester.
 export type RoutedMessage = {
   target: PendingRoute;
   clientId: number;
   parsedValue: any;
 };
 
+// Keeps the parsed inner message and its original encoding for reversible ID rewrites.
 type CustomizedPayload = {
   container: any;
   message: any;
@@ -68,6 +77,34 @@ type CustomizedPayload = {
 };
 
 export type MultiplexerDaemonHostOption = {
+  /**
+   * Configuration for the daemon host.
+   *
+   * Required options:
+   * | Option                       | Description                                        |
+   * | ---------------------------- | -------------------------------------------------- |
+   * | controlEndpoint              | Daemon control IPC endpoint.                       |
+   * | protocolVersion              | Control protocol version.                          |
+   * | multiplexerDaemonIdleTimeout | Idle shutdown delay in ms; negative disables it.   |
+   *
+   * Optional options:
+   * | Option                       | Description                                        |
+   * | ---------------------------- | -------------------------------------------------- |
+   * | debugInfo                    | Diagnostic metadata exposed by the daemon.         |
+   * | legacyDriverDir              | Legacy ownership data directory.                   |
+   * | enableWebSocket              | Whether to allow WebSocket serving.                |
+   * | connectionTrace              | Connection tracing configuration.                  |
+   * | websocketOption.port         | Port option; currently unused by the host.         |
+   * | websocketOption.roomId       | WebSocket room identifier.                         |
+   * | physicalConnectorOption      | Physical device discovery and connection options.  |
+   * | memoizedNotificationTtlMs     | Cache/pending validity and retry interval, in ms.   |
+   *
+   * Test or embedding overrides:
+   * | Option            | Description                                        |
+   * | ----------------- | -------------------------------------------------- |
+   * | physicalConnector | Physical connector instance to use instead of new. |
+   * | now               | Clock function; defaults to Date.now.              |
+   */
   controlEndpoint: string;
   protocolVersion: number;
   multiplexerDaemonIdleTimeout: number;
@@ -88,6 +125,10 @@ export type MultiplexerDaemonHostOption = {
 };
 
 export class MultiplexerDaemonHost {
+  /**
+   * Owns shared runtime connections, coordinates legacy ownership, and publishes client snapshots.
+   * Routes Connector and WebSocket frontend requests to runtimes and returns their responses.
+   */
   private physicalConnector: PhysicalConnector;
   private readonly manualConnect: boolean;
   private readonly connectionTraceRecorder: ConnectionTraceRecorder | null;
@@ -99,6 +140,7 @@ export class MultiplexerDaemonHost {
   private controlServer: MultiplexerControlServer | null = null;
   private webSocketController: WebSocketController | null = null;
   private webSocketServerInfo: WebSocketServerInfo | undefined;
+  // Watcher state is keyed by device serial; concurrent starts share one Promise per device.
   private readonly clientWatcherStartedDeviceIds = new Set<string>();
   private readonly clientWatcherStartingByDeviceId = new Map<
     string,
@@ -106,6 +148,12 @@ export class MultiplexerDaemonHost {
   >();
   private webSocketServerStarted = false;
   private webSocketServerStarting: Promise<WebSocketServerInfo> | null = null;
+  /**
+   * Consumer IDs serve different roles:
+   * - activeControlIds: Connected Connector control sessions that keep the daemon alive.
+   * - webSocketRequesterControlIds: Control sessions subscribed through startWSServer.
+   * - activeWebSocketDriverIds: WebSocket frontends that also keep the daemon alive.
+   */
   private readonly activeControlIds = new Set<number>();
   private readonly webSocketRequesterControlIds = new Set<number>();
   private readonly activeWebSocketDriverIds = new Set<number>();
@@ -152,7 +200,6 @@ export class MultiplexerDaemonHost {
     if (this.started) {
       return;
     }
-
     this.shutdownRequested = false;
     this.daemonStopReason = undefined;
     this.bindPhysicalConnectorEvents();
@@ -164,10 +211,8 @@ export class MultiplexerDaemonHost {
       ...(this.option.debugInfo ? { debugInfo: this.option.debugInfo } : {}),
       now: this.now,
     });
-
     // Publish the instance before awaiting start so stop() can roll back a partial startup.
     this.controlServer = controlServer;
-
     try {
       await controlServer.start();
       this.started = true;
@@ -186,6 +231,7 @@ export class MultiplexerDaemonHost {
     }
   }
 
+  // Stops daemon services and releases shared connections, pending requests, and tracing resources.
   async stop(): Promise<void> {
     if (
       !this.started &&
@@ -196,6 +242,7 @@ export class MultiplexerDaemonHost {
       return;
     }
 
+    // Attempt every cleanup before reporting failures so one error cannot strand other resources.
     const stopErrors: unknown[] = [];
     const wasStarted = this.started;
     const daemonStopReason = this.daemonStopReason;
@@ -280,19 +327,15 @@ export class MultiplexerDaemonHost {
 
   private readonly handleDeviceConnected = (device: BaseDevice): void => {
     if (!this.legacyOwnershipAttached) return;
-
     if (!this.manualConnect) {
       void this.ensureClientWatcher(device.serial);
     }
-
     this.sendSnapshot();
   };
 
   private readonly handleDeviceDisconnected = (device: BaseDevice): void => {
     if (!this.legacyOwnershipAttached) return;
-
     this.clearClientWatcherStartState(device.serial);
-
     this.sendSnapshot();
   };
 
@@ -300,7 +343,6 @@ export class MultiplexerDaemonHost {
     if (!this.legacyOwnershipAttached) {
       return;
     }
-
     this.connectionTraceRecorder?.recordAppClientConnected(client);
     this.webSocketController?.sendClientList();
     this.sendSnapshot();
@@ -310,18 +352,17 @@ export class MultiplexerDaemonHost {
     if (!this.legacyOwnershipAttached) {
       return;
     }
-
     this.connectionTraceRecorder?.recordAppClientDisconnected(id);
     this.memoizedQueryTable.clearClient(id);
     this.rejectRoutes(
       this.pendingRoutes.clearByClientId(id),
       new Error(`Multiplexer runtime client ${id} disconnected`),
     );
-
     this.webSocketController?.sendClientList();
     this.sendSnapshot();
   };
 
+  // Updates runtime state and notifies Connectors when legacy ownership changes.
   private readonly handleLegacyOwnershipChanged = (
     change: LegacyOwnershipChange,
   ): void => {
@@ -339,7 +380,6 @@ export class MultiplexerDaemonHost {
         reason: change.reason,
       });
     }
-
     this.broadcast({
       kind: "event",
       event: "legacy-ownership-changed",
@@ -363,6 +403,7 @@ export class MultiplexerDaemonHost {
     this.webSocketController?.sendClientList();
   }
 
+  // Initializes a newly connected Connector with the current snapshot and ownership state.
   handleControlConnected(controlId: number): void {
     this.activeControlIds.add(controlId);
     this.connectionTraceRecorder?.recordControlSocketConnected(controlId, {
@@ -425,6 +466,7 @@ export class MultiplexerDaemonHost {
     this.sendSnapshot(this.webSocketRequesterControlIds);
   }
 
+  // Adapts WebSocket controller events to daemon lifecycle tracking and subscribed control events.
   emit<Event extends keyof DebugerRouterDriverEvents>(
     event: Event,
     payload: DebugerRouterDriverEvents[Event],
@@ -479,6 +521,7 @@ export class MultiplexerDaemonHost {
     }
   }
 
+  // Dispatches a control RPC to the corresponding device, client, or daemon operation.
   async handleControlRpc(
     controlId: number,
     message: ControlRpcRequest,
@@ -554,6 +597,7 @@ export class MultiplexerDaemonHost {
     );
   }
 
+  // Starts client discovery for a device and returns snapshots of the matching runtimes.
   private async connectUsbClients(
     params: ControlRpcParams["connectUsbClients"],
   ): Promise<ClientSnapshot[]> {
@@ -594,6 +638,7 @@ export class MultiplexerDaemonHost {
     await this.ensureClientWatcher(deviceId);
   }
 
+  // Starts or reuses a device's client watcher after checking legacy ownership.
   private async ensureClientWatcher(deviceId: string): Promise<void> {
     const device = this.physicalConnector.devices.get(deviceId);
     if (!device) {
@@ -610,7 +655,6 @@ export class MultiplexerDaemonHost {
     // Concurrent facade requests share one watcher startup per physical device.
     const existing = this.clientWatcherStartingByDeviceId.get(deviceId);
     if (existing) return existing;
-
     const starting = Promise.resolve()
       .then(async () => {
         await this.physicalConnector.startWatchClient(
@@ -620,11 +664,11 @@ export class MultiplexerDaemonHost {
         this.clientWatcherStartedDeviceIds.add(deviceId);
       })
       .finally(() => {
+        // An older startup must not remove the entry for a newer attempt.
         if (this.clientWatcherStartingByDeviceId.get(deviceId) === starting) {
           this.clientWatcherStartingByDeviceId.delete(deviceId);
         }
       });
-
     this.clientWatcherStartingByDeviceId.set(deviceId, starting);
     await starting;
   }
@@ -634,6 +678,7 @@ export class MultiplexerDaemonHost {
     await this.physicalConnector.devices.get(deviceId)?.stopWatchClient();
   }
 
+  // Reclaim legacy ownership before restarting shared device watchers.
   private async startWatchAllClients(): Promise<void> {
     await this.legacyOwnershipGuard.reacquire();
     await this.ensureAllClientWatchers();
@@ -648,6 +693,10 @@ export class MultiplexerDaemonHost {
     );
   }
 
+  /**
+   * Stops shared client watchers and runtime connections for every Connector.
+   * Waits for watcher startup attempts to settle before disabling clients.
+   */
   private async forceDisableAllClients(): Promise<void> {
     await Promise.allSettled(
       Array.from(this.clientWatcherStartingByDeviceId.values()),
@@ -678,6 +727,7 @@ export class MultiplexerDaemonHost {
     this.physicalConnector.closeClient(clientId);
   }
 
+  // Requests daemon shutdown once and records the reason for stopping.
   private requestDaemonShutdown(reason?: string): void {
     if (!this.shutdownHandler) {
       throw {
@@ -688,7 +738,6 @@ export class MultiplexerDaemonHost {
     if (this.shutdownRequested) {
       return;
     }
-
     this.shutdownRequested = true;
     this.daemonStopReason = reason ?? "control_request";
     this.connectionTraceRecorder?.recordDaemonShutdownRequested({
@@ -702,6 +751,7 @@ export class MultiplexerDaemonHost {
     });
   }
 
+  // Starts or reuses the shared WebSocket server and subscribes the caller to its state updates.
   private async startWSServer(controlId: number): Promise<WebSocketServerInfo> {
     if (!this.option.enableWebSocket) {
       throw {
@@ -713,7 +763,6 @@ export class MultiplexerDaemonHost {
 
     // Subscribe before awaiting startup so this control cannot miss concurrent WebSocket snapshots.
     this.webSocketRequesterControlIds.add(controlId);
-
     try {
       if (this.webSocketServerStarted) {
         const info = this.webSocketServerInfo;
@@ -757,7 +806,6 @@ export class MultiplexerDaemonHost {
             this.webSocketServerStarting = null;
           });
       }
-
       const info = await this.webSocketServerStarting;
       this.sendSnapshot([controlId]);
       return info;
@@ -775,7 +823,6 @@ export class MultiplexerDaemonHost {
       host: wssHost,
       roomId: this.option.websocketOption?.roomId,
     };
-
     getDriverReportService()?.report("websocket_server_init", null, {
       port: "wssPort:" + wssHost,
     });
@@ -791,10 +838,12 @@ export class MultiplexerDaemonHost {
     return info;
   }
 
+  // Sends a runtime request and returns a Promise for its correlated response.
   private async sendMessageWithReply(
     params: ControlRpcParams["sendMessageWithReply"],
     controlId: number,
   ): Promise<ResponseMessageType> {
+    // Keep the RPC pending until the runtime response resolves this daemon-side Promise.
     return new Promise<ResponseMessageType>((resolve, reject) => {
       this.sendMessageToRuntime(params.clientId, params.message, {
         kind: "control",
@@ -806,6 +855,7 @@ export class MultiplexerDaemonHost {
     });
   }
 
+  // Forwards a message to a runtime or WebSocket frontend without waiting for a response.
   private sendMessageWithoutReply(
     params: ControlRpcParams["sendMessageWithoutReply"],
     controlId: number,
@@ -823,6 +873,7 @@ export class MultiplexerDaemonHost {
       return;
     }
 
+    // ID-bearing requests still need a route; their replies arrive as client-message events.
     this.sendMessageToRuntime(params.clientId, message, {
       kind: "control",
       requesterId: controlId,
@@ -855,6 +906,7 @@ export class MultiplexerDaemonHost {
     }
   }
 
+  // Builds the current device and client snapshot for Connector mirrors.
   createSnapshot(): Snapshot {
     const generatedAt = this.now();
     // Ownership loss hides physical and WiFi runtimes while retaining live Driver frontends.
@@ -872,6 +924,7 @@ export class MultiplexerDaemonHost {
       clients: this.serializeClients(physicalClients),
       ...(debugInfo ? { debugInfo } : {}),
     };
+    // Omit WebSocket collections until a controller exists; empty arrays mean no current clients.
     const websocketAppClients = this.getWebSocketAppClients();
     const websocketWebClients = this.getWebSocketWebClients();
     if (websocketAppClients) {
@@ -910,6 +963,7 @@ export class MultiplexerDaemonHost {
     return { ...client.info };
   }
 
+  // Allocate USB and WebSocket client IDs from the same sequence.
   createClientId(): number {
     return this.physicalConnector.createClientId();
   }
@@ -918,7 +972,6 @@ export class MultiplexerDaemonHost {
     if (!this.legacyOwnershipAttached) {
       return [];
     }
-
     return this.physicalConnector.getAllUsbClients();
   }
 
@@ -929,7 +982,6 @@ export class MultiplexerDaemonHost {
     if (!this.legacyOwnershipAttached) {
       return Promise.resolve([]);
     }
-
     return this.physicalConnector.getDevices(timeout, serial);
   }
 
@@ -939,7 +991,6 @@ export class MultiplexerDaemonHost {
     if (!this.option.debugInfo) {
       return undefined;
     }
-
     return {
       ...this.option.debugInfo,
       protocolVersion: this.protocolVersion,
@@ -985,7 +1036,6 @@ export class MultiplexerDaemonHost {
     if (!this.legacyOwnershipAttached) {
       return;
     }
-
     this.handlePhysicalMessage(payload.id, payload.message);
   };
 
@@ -1024,17 +1074,20 @@ export class MultiplexerDaemonHost {
         message: `Multiplexer client was not found: ${clientId}`,
       };
     }
+    // Clone object input so ID rewriting does not mutate the caller's message.
     const data =
       typeof message === "string"
         ? parseJsonMessage(message)
         : cloneJsonValue(message);
 
+    // Keep legacy USB handshake messages out of the runtime request path.
     if (
       data?.data?.type === "UsbConnect" ||
       data?.data?.type === "UsbConnectAck"
     ) {
       return;
     }
+    // USB uses the legacy -1 client ID; WebSocket uses the daemon-assigned runtime ID.
     if (data?.data?.data?.client_id) {
       data.data.data.client_id = websocketClient ? clientId : -1;
     }
@@ -1055,10 +1108,6 @@ export class MultiplexerDaemonHost {
 
     // Register the route before sending so an immediate runtime response can be correlated.
     const route = this.rewriteOutboundMessageData(data, target);
-    // Retry the normalized payload directly; re-entering this method would
-    // coalesce it as already pending.
-    const retryMessage =
-      memoizedQuery.action === "forward" ? cloneJsonValue(data) : undefined;
     try {
       if (websocketClient) {
         websocketClient.sendMessage(JSON.stringify(data));
@@ -1079,6 +1128,9 @@ export class MultiplexerDaemonHost {
     }
 
     if (memoizedQuery.action === "forward") {
+      // Retry the normalized payload directly; re-entering this method would
+      // coalesce it as already pending.
+      const retryMessage = cloneJsonValue(data);
       this.memoizedQueryTable.setRetryTimer(
         clientId,
         memoizedQuery.requestType,
@@ -1105,6 +1157,7 @@ export class MultiplexerDaemonHost {
     }
   }
 
+  // Returns a cached notification through the requester's RPC, control event, or WebSocket.
   private sendMessageToTargetDriver(
     target: PendingTargetSeed,
     clientId: number,
@@ -1129,10 +1182,10 @@ export class MultiplexerDaemonHost {
       });
       return;
     }
-
     this.sendMessageToWebClient(target.requesterId, message);
   }
 
+  // Replaces the inner request ID with a global ID and records the route back to the requester.
   private rewriteOutboundMessageData(
     data: any,
     target: PendingTargetSeed,
@@ -1142,13 +1195,11 @@ export class MultiplexerDaemonHost {
     if (!customized || originalId === null) {
       return null;
     }
-
     const route = this.pendingRoutes.add({
       ...target,
       originalId,
       clientId: target.clientId,
     });
-
     customized.message.id = route.globalMessageId;
     writeCustomizedMessage(customized);
     return route;
@@ -1242,12 +1293,10 @@ export class MultiplexerDaemonHost {
     if (!parsedValue) {
       return null;
     }
-
     const globalMessageId = getValidMessageId(customized?.message);
     if (globalMessageId === null) {
       return null;
     }
-
     const pendingTarget = this.pendingRoutes.get(globalMessageId);
     // Validate the runtime origin before consuming a globally unique route.
     if (pendingTarget && pendingTarget.clientId !== sourceClientId) {
@@ -1262,12 +1311,10 @@ export class MultiplexerDaemonHost {
     if (!target) {
       return null;
     }
-
     if (customized) {
       customized.message.id = target.originalId;
       writeCustomizedMessage(customized);
     }
-
     return {
       target,
       clientId: target.clientId,
@@ -1280,12 +1327,10 @@ export class MultiplexerDaemonHost {
       defaultLogger.warn("enableWebSocket isn't opened!");
       return;
     }
-
     if (!this.webSocketController) {
       defaultLogger.warn("websocket server hasn't started up");
       return;
     }
-
     this.webSocketController.sendMessageToWeb(message);
   }
 
@@ -1294,12 +1339,10 @@ export class MultiplexerDaemonHost {
       defaultLogger.warn("enableWebSocket isn't opened!");
       return;
     }
-
     if (!this.webSocketController) {
       defaultLogger.warn("websocket server hasn't started up");
       return;
     }
-
     this.webSocketController.sendMessageToWebClient(webClientId, message);
   }
 
@@ -1347,6 +1390,7 @@ export class MultiplexerDaemonHost {
     this.clientWatcherStartingByDeviceId.clear();
   }
 
+  // Clears watcher bookkeeping and cached queries, and invalidates pending routes.
   private clearRuntimeState(): void {
     this.clearAllClientWatcherStartState();
     this.memoizedQueryTable.clear();
@@ -1375,12 +1419,10 @@ export class MultiplexerDaemonHost {
     if (!this.started || !this.idleTimeoutHandler) {
       return;
     }
-
     const idleTimeout = this.option.multiplexerDaemonIdleTimeout;
     if (idleTimeout < 0 || this.isInUse()) {
       return;
     }
-
     this.clearIdleTimeout();
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
@@ -1400,7 +1442,6 @@ export class MultiplexerDaemonHost {
     if (!this.idleTimer) {
       return;
     }
-
     clearTimeout(this.idleTimer);
     this.idleTimer = null;
   }
@@ -1419,7 +1460,6 @@ function cloneJsonValue(value: unknown): unknown {
   if (value === undefined || value === null) {
     return value;
   }
-
   try {
     return JSON.parse(JSON.stringify(value));
   } catch (_error) {
@@ -1454,7 +1494,6 @@ function getCustomizedPayload(data: any): CustomizedPayload | null {
   ) {
     return null;
   }
-
   const rawMessage = container.message;
   const messageWasString = typeof rawMessage === "string";
   const message = messageWasString
@@ -1463,11 +1502,11 @@ function getCustomizedPayload(data: any): CustomizedPayload | null {
   if (typeof message !== "object" || message === null) {
     return null;
   }
-
   return { container, message, messageWasString };
 }
 
 function writeCustomizedMessage(payload: CustomizedPayload): void {
+  // Object payloads are already updated in place; string payloads must be serialized again.
   if (payload.messageWasString) {
     payload.container.message = JSON.stringify(payload.message);
   }
@@ -1477,6 +1516,10 @@ function getValidMessageId(message: any | null | undefined): number | null {
   return Number.isSafeInteger(message?.id) ? message.id : null;
 }
 
+/**
+ * Copies the reply envelope before normalizing client_id and stringifying the inner message,
+ * preserving the cached or routed input.
+ */
 function normalizeRawResponse(
   data: any,
   clientId: number,
@@ -1484,7 +1527,6 @@ function normalizeRawResponse(
   if (!data?.data?.data) {
     return data as ResponseMessageType;
   }
-
   const responsePayload = { ...data.data.data };
   if (Object.prototype.hasOwnProperty.call(responsePayload, "client_id")) {
     responsePayload.client_id = clientId;
@@ -1505,6 +1547,7 @@ function normalizeRawResponse(
   } as ResponseMessageType;
 }
 
+// Rewrites runtime identity fields for WebSocket delivery without changing the inner message ID.
 function rewriteRuntimeClientIdData(data: any, clientId: number): void {
   if (data?.data && Object.prototype.hasOwnProperty.call(data.data, "sender")) {
     data.data.sender = clientId;
