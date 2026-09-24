@@ -126,12 +126,9 @@ export class MultiplexerDaemonHost {
     this.manualConnect = option.physicalConnectorOption?.manualConnect ?? false;
     this.protocolVersion = option.protocolVersion;
     this.now = option.now ?? Date.now;
-    this.pendingRoutes = new PendingRouteTable({
-      now: this.now,
-    });
+    this.pendingRoutes = new PendingRouteTable();
     this.memoizedQueryTable = new MemoizedQueryTable({
       validityPeriodMs: option.memoizedNotificationTtlMs,
-      now: this.now,
     });
 
     this.connectionTraceRecorder = createConnectionTraceRecorder(

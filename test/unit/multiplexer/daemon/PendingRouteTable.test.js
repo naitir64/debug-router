@@ -34,12 +34,28 @@ function createTimers() {
 }
 
 describe("PendingRouteTable", function () {
+  let timers;
+  let originalSetTimeout;
+  let originalClearTimeout;
+  let originalNow;
+
+  beforeEach(function () {
+    originalSetTimeout = global.setTimeout;
+    originalClearTimeout = global.clearTimeout;
+    originalNow = Date.now;
+    timers = createTimers();
+    global.setTimeout = timers.setTimeout;
+    global.clearTimeout = timers.clearTimeout;
+  });
+
+  afterEach(function () {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    Date.now = originalNow;
+  });
+
   it("allocates sequential global message ids without reusing removed ids", function () {
-    const timers = createTimers();
-    const table = new PendingRouteTable({
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    const table = new PendingRouteTable();
     const first = table.add({
       kind: "control",
       requesterId: 1,
@@ -68,13 +84,9 @@ describe("PendingRouteTable", function () {
   });
 
   it("adds, gets, takes, and clears a control route timer", function () {
-    const timers = createTimers();
     let now = 100;
-    const table = new PendingRouteTable({
-      now: () => now,
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    Date.now = () => now;
+    const table = new PendingRouteTable();
     const rejectCalls = [];
 
     const route = table.add({
@@ -103,12 +115,8 @@ describe("PendingRouteTable", function () {
   });
 
   it("supports websocket routes and clears their timers", function () {
-    const timers = createTimers();
-    const table = new PendingRouteTable({
-      now: () => 500,
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    Date.now = () => 500;
+    const table = new PendingRouteTable();
 
     const route = table.add({
       kind: "websocket",
@@ -132,11 +140,7 @@ describe("PendingRouteTable", function () {
   });
 
   it("clears only the matching control routes and clears their timers", function () {
-    const timers = createTimers();
-    const table = new PendingRouteTable({
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    const table = new PendingRouteTable();
     const first = table.add({
       kind: "control",
       requesterId: 9,
@@ -174,11 +178,7 @@ describe("PendingRouteTable", function () {
   });
 
   it("clears only the matching websocket routes and leaves control routes intact", function () {
-    const timers = createTimers();
-    const table = new PendingRouteTable({
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    const table = new PendingRouteTable();
     const control = table.add({
       kind: "control",
       requesterId: 20,
@@ -212,11 +212,7 @@ describe("PendingRouteTable", function () {
   });
 
   it("clears every route targeting a disconnected runtime client", function () {
-    const timers = createTimers();
-    const table = new PendingRouteTable({
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    const table = new PendingRouteTable();
     const control = table.add({
       kind: "control",
       requesterId: 10,
@@ -244,11 +240,7 @@ describe("PendingRouteTable", function () {
   });
 
   it("clear removes every route and timer in insertion order", function () {
-    const timers = createTimers();
-    const table = new PendingRouteTable({
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-    });
+    const table = new PendingRouteTable();
     const first = table.add({
       kind: "control",
       requesterId: 1,
@@ -272,15 +264,10 @@ describe("PendingRouteTable", function () {
     assert.deepStrictEqual(table.clear(), []);
   });
 
-  it("times out control and websocket routes, rejects only control routes, and calls onTimeout", function () {
-    const timers = createTimers();
-    const timeoutRoutes = [];
+  it("times out control and websocket routes and rejects only control routes", function () {
     const rejected = [];
     const table = new PendingRouteTable({
       timeoutMs: 25,
-      setTimeout: timers.setTimeout,
-      clearTimeout: timers.clearTimeout,
-      onTimeout: (route) => timeoutRoutes.push(route),
     });
     const control = table.add({
       kind: "control",
@@ -294,15 +281,17 @@ describe("PendingRouteTable", function () {
       requesterId: 2,
       originalId: 102,
       clientId: 12,
+      reject: (error) => rejected.push(error),
     });
 
+    assert.strictEqual(timers.timers[0].timeoutMs, 25);
+    assert.strictEqual(timers.timers[1].timeoutMs, 25);
     timers.run(timers.timers[0]);
     timers.run(timers.timers[1]);
     timers.run(timers.timers[0]);
 
     assert.strictEqual(table.get(control.globalMessageId), null);
     assert.strictEqual(table.get(web.globalMessageId), null);
-    assert.deepStrictEqual(timeoutRoutes, [control, web]);
     assert.strictEqual(rejected.length, 1);
     assert.match(
       rejected[0].message,

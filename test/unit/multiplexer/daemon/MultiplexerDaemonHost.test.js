@@ -704,6 +704,7 @@ function createSessionListMessage(clientId, sessions) {
 
 describe("MultiplexerDaemonHost", function () {
   let restoreLegacyOwnershipGuard;
+  let originalNow;
 
   before(function () {
     const legacyOwnershipImport = hostModule.__get__("LegacyOwnershipGuard_1");
@@ -720,10 +721,12 @@ describe("MultiplexerDaemonHost", function () {
   });
 
   beforeEach(function () {
+    originalNow = Date.now;
     FakeLegacyOwnershipGuard.instances = [];
   });
 
   afterEach(function () {
+    Date.now = originalNow;
     defaultLogger.setOutput(() => {});
   });
 
@@ -2806,10 +2809,10 @@ describe("MultiplexerDaemonHost", function () {
 
   it("coalesces concurrent ListSession queries and targets a fresh SessionList cache hit to one websocket frontend", function () {
     let now = 1000;
+    Date.now = () => now;
     const { host, physical } = createHost({
       enableWebSocket: true,
       memoizedNotificationTtlMs: 100,
-      now: () => now,
     });
     const client = createClient(20);
     const webMessages = [];
@@ -2939,9 +2942,9 @@ describe("MultiplexerDaemonHost", function () {
 
   it("retries ListSession after pending or cached data becomes stale", function () {
     let now = 2000;
+    Date.now = () => now;
     const { host, physical } = createHost({
       memoizedNotificationTtlMs: 100,
-      now: () => now,
     });
     const client = createClient(21);
     const controlServer = attachControlServer(host);
