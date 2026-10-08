@@ -467,6 +467,7 @@ class FakeStartControlServer {
   static instances = [];
   static startError = null;
   static stopError = null;
+  static startImpl = null;
 
   constructor(option) {
     this.option = option;
@@ -482,6 +483,9 @@ class FakeStartControlServer {
     this.startCalls++;
     if (FakeStartControlServer.startError) {
       throw FakeStartControlServer.startError;
+    }
+    if (FakeStartControlServer.startImpl) {
+      await FakeStartControlServer.startImpl(this);
     }
   }
 
@@ -729,6 +733,7 @@ describe("MultiplexerDaemonHost", function () {
   beforeEach(function () {
     originalNow = Date.now;
     FakeLegacyOwnershipGuard.instances = [];
+    FakeStartControlServer.startImpl = null;
   });
 
   afterEach(function () {
@@ -919,6 +924,85 @@ describe("MultiplexerDaemonHost", function () {
     }
   });
 
+  it("shares one startup attempt with concurrent callers", async function () {
+    FakeStartControlServer.instances = [];
+    FakeStartControlServer.startError = null;
+    FakeStartControlServer.stopError = null;
+    const resetControlServer = replaceControlServerForStart();
+    const { host, physical } = createHost();
+    const startGate = createDeferred();
+
+    FakeStartControlServer.startImpl = async () => {
+      await startGate.promise;
+    };
+
+    try {
+      const firstStart = host.start();
+      const secondStart = host.start();
+      startGate.resolve();
+
+      await Promise.all([firstStart, secondStart]);
+
+      assert.strictEqual(FakeStartControlServer.instances.length, 1);
+      assert.strictEqual(FakeStartControlServer.instances[0].startCalls, 1);
+      assert.strictEqual(physical.listenerCount("device-connected"), 1);
+    } finally {
+      FakeStartControlServer.startImpl = null;
+      resetControlServer();
+    }
+  });
+
+  it("waits for an in-flight startup before stopping and ignores later starts", async function () {
+    FakeStartControlServer.instances = [];
+    FakeStartControlServer.startError = null;
+    FakeStartControlServer.stopError = null;
+    const resetControlServer = replaceControlServerForStart();
+    const { host, physical } = createHost();
+    const startEntered = createDeferred();
+    const startGate = createDeferred();
+    const logs = [];
+
+    FakeStartControlServer.startImpl = async () => {
+      startEntered.resolve();
+      await startGate.promise;
+    };
+
+    defaultLogger.setOutput((level, ...message) => {
+      logs.push(message.join(" "));
+    });
+
+    try {
+      const startPromise = host.start();
+      await startEntered.promise;
+      const stopPromise = host.stop();
+
+      startGate.resolve();
+      await Promise.all([startPromise, stopPromise]);
+
+      assert.strictEqual(FakeStartControlServer.instances[0].stopCalls, 1);
+      assert.strictEqual(physical.closeCalls, 1);
+      assert.strictEqual(physical.listenerCount("device-connected"), 0);
+
+      await host.start();
+
+      assert.strictEqual(FakeStartControlServer.instances.length, 1);
+      assert.strictEqual(FakeStartControlServer.instances[0].startCalls, 1);
+      assert.ok(
+        logs.some((log) =>
+          log.includes(
+            "Multiplexer daemon host is closed; ignoring a start request"
+          )
+        )
+      );
+    } finally {
+      FakeStartControlServer.startImpl = null;
+      FakeStartControlServer.startError = null;
+      FakeStartControlServer.stopError = null;
+      defaultLogger.setOutput(() => {});
+      resetControlServer();
+    }
+  });
+
   it("cleans physical listeners and connector resources when control server start fails", async function () {
     FakeStartControlServer.instances = [];
     FakeStartControlServer.startError = new Error("control start failed");
@@ -930,12 +1014,31 @@ describe("MultiplexerDaemonHost", function () {
 
       assert.strictEqual(physical.closeCalls, 1);
       assert.strictEqual(FakeStartControlServer.instances.length, 1);
-      assert.strictEqual(FakeStartControlServer.instances[0].stopCalls, 1);
+      assert.strictEqual(FakeStartControlServer.instances[0].stopCalls, 0);
       assert.strictEqual(physical.listenerCount("device-connected"), 0);
       assert.strictEqual(physical.listenerCount("client-connected"), 0);
+
+      FakeStartControlServer.startError = null;
+      const logs = [];
+      defaultLogger.setOutput((level, ...message) => {
+        logs.push(message.join(" "));
+      });
+      await host.start();
+
+      assert.strictEqual(FakeStartControlServer.instances.length, 1);
+      assert.strictEqual(FakeStartControlServer.instances[0].startCalls, 1);
+      assert.ok(
+        logs.some((log) =>
+          log.includes(
+            "Multiplexer daemon host is closed; ignoring a start request"
+          )
+        )
+      );
     } finally {
+      FakeStartControlServer.startImpl = null;
       FakeStartControlServer.startError = null;
       FakeStartControlServer.stopError = null;
+      defaultLogger.setOutput(() => {});
       resetControlServer();
     }
   });
@@ -2677,6 +2780,49 @@ describe("MultiplexerDaemonHost", function () {
     }
   });
 
+  it("waits for the WebSocket controller close before completing stop", async function () {
+    const { host } = createHost({
+      enableWebSocket: true,
+    });
+    const closeGate = createDeferred();
+    const controller = {
+      closeCalls: 0,
+      close() {
+        this.closeCalls++;
+        return closeGate.promise;
+      },
+      getAllWebsocketAppClients() {
+        return new Map();
+      },
+      getAllWebsocketWebClients() {
+        return new Map();
+      },
+    };
+    host.webSocketController = controller;
+    host.webSocketServerStarted = true;
+    host.webSocketServerInfo = {
+      port: 19001,
+      host: "127.0.0.1:19001",
+      roomId: undefined,
+    };
+
+    let stopped = false;
+    const stopPromise = host.stop().then(() => {
+      stopped = true;
+    });
+    await nextTick();
+
+    assert.strictEqual(controller.closeCalls, 1);
+    assert.strictEqual(stopped, false);
+
+    closeGate.resolve();
+    await stopPromise;
+
+    assert.strictEqual(stopped, true);
+    assert.strictEqual(host.webSocketController, null);
+    assert.strictEqual(host.webSocketServerStarted, false);
+  });
+
   it("startWSServer shares in-flight starts and is idempotent after success", async function () {
     const { host } = createHost({
       enableWebSocket: true,
@@ -2717,6 +2863,143 @@ describe("MultiplexerDaemonHost", function () {
     assert.strictEqual(calls, 1);
   });
 
+  it("waits for in-flight WebSocket port detection before stopping and rejects later starts", async function () {
+    const instances = [];
+    class FakeWebSocketController {
+      constructor(_controllerHost, option) {
+        this.closeCalls = 0;
+        option.callback();
+        instances.push(this);
+      }
+
+      close() {
+        this.closeCalls++;
+      }
+
+      getAllWebsocketAppClients() {
+        return new Map();
+      }
+
+      getAllWebsocketWebClients() {
+        return new Map();
+      }
+    }
+    const detectEntered = createDeferred();
+    const detectGate = createDeferred();
+    const reset = replaceWebSocketStartDependencies({
+      detectPortImpl: async () => {
+        detectEntered.resolve();
+        await detectGate.promise;
+        return 19001;
+      },
+      addressImpl: () => "127.0.0.1",
+      WebSocketControllerCtor: FakeWebSocketController,
+    });
+    const { host } = createHost({
+      enableWebSocket: true,
+    });
+
+    try {
+      const startPromise = host.handleControlRpc(
+        1,
+        createRpcRequest("startWSServer", {})
+      );
+      await detectEntered.promise;
+
+      const stopPromise = host.stop();
+      detectGate.resolve(19001);
+
+      assert.deepStrictEqual(await startPromise, {
+        port: 19001,
+        host: "127.0.0.1:19001",
+        roomId: undefined,
+      });
+      await stopPromise;
+
+      await assert.rejects(
+        host.handleControlRpc(1, createRpcRequest("startWSServer", {})),
+        (error) =>
+          error.code === "websocket-server-unavailable" &&
+          error.message ===
+            "The multiplexer daemon WebSocket server is unavailable because the daemon host is closed"
+      );
+
+      assert.strictEqual(instances.length, 1);
+      assert.strictEqual(instances[0].closeCalls, 1);
+      assert.strictEqual(host.webSocketController, null);
+      assert.strictEqual(host.webSocketServerStarted, false);
+      assert.strictEqual(host.webSocketServerStarting, null);
+    } finally {
+      reset();
+    }
+  });
+
+  it("waits for an in-flight WebSocket listening callback before cleanup", async function () {
+    const instances = [];
+    let listeningCallback;
+    class FakeWebSocketController {
+      constructor(_controllerHost, option) {
+        this.closeCalls = 0;
+        this.option = option;
+        listeningCallback = option.callback;
+        instances.push(this);
+      }
+
+      close() {
+        this.closeCalls++;
+      }
+
+      getAllWebsocketAppClients() {
+        return new Map();
+      }
+
+      getAllWebsocketWebClients() {
+        return new Map();
+      }
+    }
+    const reset = replaceWebSocketStartDependencies({
+      detectPortImpl: async () => 19001,
+      addressImpl: () => "127.0.0.1",
+      WebSocketControllerCtor: FakeWebSocketController,
+    });
+    const { host } = createHost({
+      enableWebSocket: true,
+    });
+
+    try {
+      const startPromise = host.handleControlRpc(
+        1,
+        createRpcRequest("startWSServer", {})
+      );
+      await nextTick();
+
+      assert.strictEqual(instances.length, 1);
+      assert.strictEqual(host.webSocketController, instances[0]);
+
+      const stopPromise = host.stop();
+      listeningCallback();
+
+      assert.deepStrictEqual(await startPromise, {
+        port: 19001,
+        host: "127.0.0.1:19001",
+        roomId: undefined,
+      });
+      await stopPromise;
+
+      await assert.rejects(
+        host.handleControlRpc(1, createRpcRequest("startWSServer", {})),
+        (error) => error.code === "websocket-server-unavailable"
+      );
+
+      assert.strictEqual(instances[0].closeCalls, 1);
+      assert.strictEqual(host.webSocketController, null);
+      assert.strictEqual(host.webSocketServerStarted, false);
+      assert.strictEqual(host.webSocketServerStarting, null);
+    } finally {
+      reset();
+    }
+  });
+
   it("startWSServer clears the in-flight state after failure so it can retry", async function () {
     const { host } = createHost({
       enableWebSocket: true,
@@ -2752,6 +3035,54 @@ describe("MultiplexerDaemonHost", function () {
     assert.strictEqual(calls, 2);
     assert.strictEqual(host.webSocketController, null);
     assert.strictEqual(controllers[1].closeCalls, 1);
+  });
+
+  it("waits for failed WebSocket controller cleanup before settling the startup attempt", async function () {
+    const { host } = createHost({
+      enableWebSocket: true,
+    });
+    const closeGate = createDeferred();
+    let closeFinished = false;
+    host.startWebSocketServerInternal = async () => {
+      host.webSocketController = {
+        close() {
+          return closeGate.promise.then(() => {
+            closeFinished = true;
+          });
+        },
+      };
+      throw {
+        code: "custom-start-failed",
+        message: "custom start failed",
+      };
+    };
+
+    const startPromise = host.handleControlRpc(
+      1,
+      createRpcRequest("startWSServer", {})
+    );
+    await nextTick();
+
+    let rejected = false;
+    startPromise.catch(() => {
+      rejected = true;
+    });
+    await nextTick();
+
+    assert.strictEqual(closeFinished, false);
+    assert.strictEqual(rejected, false);
+
+    closeGate.resolve();
+    await assert.rejects(
+      startPromise,
+      (error) =>
+        error.code === "custom-start-failed" &&
+        error.message === "custom start failed"
+    );
+
+    assert.strictEqual(closeFinished, true);
+    assert.strictEqual(host.webSocketController, null);
+    assert.strictEqual(host.webSocketServerStarting, null);
   });
 
   it("sendMessageWithoutReply web broadcast returns when websocket is disabled or the server has not started", async function () {
