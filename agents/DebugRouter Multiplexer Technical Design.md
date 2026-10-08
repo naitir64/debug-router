@@ -273,7 +273,8 @@ There is no separate `MultiplexerDaemon` lifecycle wrapper. Host options are pro
 - Maintaining legacy `LatestDriverProcess` owner state.
 - Managing idle timeout and shutdown handlers.
 
-Host startup publishes the control-server instance before awaiting `listen`, allowing `stop()` to roll back a partial start. Shutdown first detaches lifecycle state, then closes WebSocket, control, physical, routing, and trace resources exactly once. The narrow `clearRuntimeState()` helper clears only watcher-start bookkeeping, memoized queries, and pending routes; server flags, consumer sets, and idle state are owned by the surrounding `stop()` sequence.
+Host lifecycle status is `uninitialized` before startup, `ready` after startup completes, and `closed` once shutdown is requested. Concurrent start calls share one in-flight promise, and `stop()` is serialized after that startup before cleanup. The active control server is published only after its listener starts successfully, while startup failures roll back connector and trace resources. Closing the Host is terminal: later start requests are logged and ignored. Shutdown first detaches lifecycle state, then closes WebSocket, control, physical, routing, and trace resources exactly once. The narrow `clearRuntimeState()` helper clears only watcher-start bookkeeping, memoized queries, and pending routes; server flags, consumer sets, and idle state are owned by the surrounding shutdown sequence.
+Closing rejects new WebSocket-server requests. Shutdown waits for an in-flight WebSocket startup before cleanup, then closes the resulting controller exactly once. WebSocket-controller shutdown is idempotent, closes both client sockets and the underlying server, and is awaited by Host cleanup so the listening port is released before shutdown completes.
 
 ## 8. Control Protocol
 

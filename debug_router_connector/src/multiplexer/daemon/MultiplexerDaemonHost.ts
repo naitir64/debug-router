@@ -80,6 +80,11 @@ type CustomizedPayload = {
   messageWasString: boolean;
 };
 
+type MultiplexerDaemonHostLifecycleStatus =
+  | "uninitialized"
+  | "ready"
+  | "closed";
+
 export type MultiplexerDaemonHostOption = {
   /**
    * Configuration for the daemon host.
@@ -172,7 +177,9 @@ export class MultiplexerDaemonHost {
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutHandler: (() => void | Promise<void>) | undefined;
   private shutdownHandler: (() => void | Promise<void>) | undefined;
-  private started = false;
+  private lifecycleStatus: MultiplexerDaemonHostLifecycleStatus =
+    "uninitialized";
+  private startingPromise: Promise<void> | null = null;
   private shutdownRequested = false;
   private daemonStopReason: string | undefined;
 
@@ -215,10 +222,36 @@ export class MultiplexerDaemonHost {
   }
 
   // Starts the control plane; physical watchers and WebSocket serving remain demand-driven.
+  // A closed Host is terminal, while a ready Host makes repeated starts no-ops.
   async start(): Promise<void> {
-    if (this.started) {
+    if (this.lifecycleStatus === "closed") {
+      defaultLogger.info(
+        "Multiplexer daemon host is closed; ignoring a start request",
+      );
       return;
     }
+    if (this.lifecycleStatus === "ready") {
+      return;
+    }
+    if (this.startingPromise) {
+      return this.startingPromise;
+    }
+
+    // The promise only represents an in-flight start; lifecycleStatus represents steady state.
+    this.startingPromise = this.startInternal()
+      .catch(async (error: unknown) => {
+        // Clear the in-flight marker before rolling back so stop() cannot wait on this promise.
+        this.startingPromise = null;
+        await this.stop();
+        throw error;
+      })
+      .finally(() => {
+        this.startingPromise = null;
+      });
+    return this.startingPromise;
+  }
+
+  private async startInternal(): Promise<void> {
     this.shutdownRequested = false;
     this.daemonStopReason = undefined;
     this.bindPhysicalConnectorEvents();
@@ -230,23 +263,20 @@ export class MultiplexerDaemonHost {
       ...(this.option.debugInfo ? { debugInfo: this.option.debugInfo } : {}),
       now: this.now,
     });
-    // Publish the instance before awaiting start so stop() can roll back a partial startup.
+    // Publish the instance only after listen succeeds; stop() is serialized behind startup.
+    await controlServer.start();
     this.controlServer = controlServer;
-    try {
-      await controlServer.start();
-      this.started = true;
-      const debugInfo = this.createDebugInfo();
-      this.connectionTraceRecorder?.recordDaemonStarted({
-        pid: process.pid,
-        controlEndpoint: controlServer.controlEndpoint,
-        protocolVersion: this.protocolVersion,
-        ...(debugInfo ? { debugInfo } : {}),
-      });
-      await this.legacyOwnershipGuard.start();
+    const debugInfo = this.createDebugInfo();
+    this.connectionTraceRecorder?.recordDaemonStarted({
+      pid: process.pid,
+      controlEndpoint: controlServer.controlEndpoint,
+      protocolVersion: this.protocolVersion,
+      ...(debugInfo ? { debugInfo } : {}),
+    });
+    await this.legacyOwnershipGuard.start();
+    if (this.lifecycleStatus === "uninitialized") {
+      this.lifecycleStatus = "ready";
       this.scheduleIdleTimeoutIfNeeded();
-    } catch (error) {
-      await this.stop();
-      throw error;
     }
   }
 
@@ -255,21 +285,34 @@ export class MultiplexerDaemonHost {
     this.reportBridge.close();
     this.reportControlIds.clear();
     setDriverReportService(null);
-    if (
-      !this.started &&
-      !this.controlServer &&
-      !this.webSocketController &&
-      !this.connectionTraceRecorder
-    ) {
+
+    // Closing is terminal. Repeated or concurrent requests return while the first stop cleans up.
+    if (this.lifecycleStatus === "closed") {
       return;
     }
+    this.lifecycleStatus = "closed";
 
+    // Serialize shutdown after any in-flight startup so stop cannot race controlServer.start().
+    if (this.startingPromise) {
+      await this.startingPromise.catch(() => {
+        // The start caller observes the startup error; stop reports only cleanup errors.
+      });
+    }
+
+    // WebSocket serving is demand-driven, so serialize it with shutdown as well.
+    if (this.webSocketServerStarting) {
+      await this.webSocketServerStarting.catch(() => {
+        // The startWSServer caller observes the startup error; stop reports cleanup errors.
+      });
+    }
+    await this.stopInternal();
+  }
+
+  private async stopInternal(): Promise<void> {
     // Attempt every cleanup before reporting failures so one error cannot strand other resources.
     const stopErrors: unknown[] = [];
-    const wasStarted = this.started;
     const daemonStopReason = this.daemonStopReason;
     // Detach lifecycle state first because closing transports may emit callbacks synchronously.
-    this.started = false;
     this.shutdownRequested = false;
     this.clearIdleTimeout();
     this.legacyOwnershipGuard.stop();
@@ -283,10 +326,9 @@ export class MultiplexerDaemonHost {
     this.webSocketController = null;
     this.webSocketServerInfo = undefined;
     this.webSocketServerStarted = false;
-    this.webSocketServerStarting = null;
     try {
       if (webSocketController) {
-        webSocketController.close();
+        await webSocketController.close();
         this.connectionTraceRecorder?.recordWebsocketServerStopped({
           port: webSocketServerInfo?.port,
           host: webSocketServerInfo?.host,
@@ -314,12 +356,10 @@ export class MultiplexerDaemonHost {
       this.clearRuntimeState();
     }
 
-    if (wasStarted) {
-      this.connectionTraceRecorder?.recordDaemonStopped({
-        pid: process.pid,
-        reason: daemonStopReason,
-      });
-    }
+    this.connectionTraceRecorder?.recordDaemonStopped({
+      pid: process.pid,
+      reason: daemonStopReason,
+    });
     this.daemonStopReason = undefined;
 
     try {
@@ -801,6 +841,13 @@ export class MultiplexerDaemonHost {
 
   // Starts or reuses the shared WebSocket server and subscribes the caller to its state updates.
   private async startWSServer(controlId: number): Promise<WebSocketServerInfo> {
+    if (this.lifecycleStatus === "closed") {
+      throw {
+        code: "websocket-server-unavailable",
+        message:
+          "The multiplexer daemon WebSocket server is unavailable because the daemon host is closed",
+      };
+    }
     if (!this.option.enableWebSocket) {
       throw {
         code: "websocket-disabled",
@@ -834,11 +881,11 @@ export class MultiplexerDaemonHost {
             this.connectionTraceRecorder?.recordWebsocketServerStarted(info);
             return info;
           })
-          .catch((error) => {
+          .catch(async (error) => {
             const webSocketController = this.webSocketController;
             this.webSocketController = null;
             try {
-              webSocketController?.close();
+              await webSocketController?.close();
             } catch (closeError) {
               defaultLogger.warn(
                 `Failed to close WebSocket controller after start failure: ${
@@ -1465,7 +1512,7 @@ export class MultiplexerDaemonHost {
 
   // Runtime Apps do not own daemon lifetime; only controls and Driver frontends do.
   private scheduleIdleTimeoutIfNeeded(): void {
-    if (!this.started || !this.idleTimeoutHandler) {
+    if (this.lifecycleStatus !== "ready" || !this.idleTimeoutHandler) {
       return;
     }
     const idleTimeout = this.option.multiplexerDaemonIdleTimeout;

@@ -15,6 +15,7 @@ export class WebSocketController {
   private roomId: string;
   private wssPath: string;
   private server: WebSocketServer;
+  private closePromise: Promise<void> | null = null;
   // websocketAppClients
   private websocketAppClients: Map<number, WebSocketClient> = new Map();
   // web clients
@@ -53,11 +54,42 @@ export class WebSocketController {
       }
     });
     wsService.on("connection", this.handleConnection.bind(this));
-    wsService.on("close", this.close.bind(this));
+    wsService.on("close", this.handleServerClose.bind(this));
     this.server = wsService;
   }
 
-  close() {
+  close(): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+
+    this.closePromise = Promise.resolve().then(() => {
+      this.closeClients();
+
+      return new Promise<void>((resolve, reject) => {
+        this.server.close((error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      });
+    });
+
+    return this.closePromise;
+  }
+
+  private handleServerClose(): void {
+    if (this.closePromise) {
+      return;
+    }
+    this.closePromise = Promise.resolve().then(() => {
+      this.closeClients();
+    });
+  }
+
+  private closeClients(): void {
     this.websocketAppClients.forEach((client) => {
       client.close();
     });
