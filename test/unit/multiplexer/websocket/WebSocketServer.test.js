@@ -114,10 +114,19 @@ function createController() {
   controller.websocketAppClients = new Map();
   controller.webClients = new Map();
   controller.roomId = "room-1";
+  const server = {
+    closeCalls: 0,
+    close(callback) {
+      this.closeCalls++;
+      callback?.();
+    },
+  };
+  controller.server = server;
   return {
     controller,
     calls,
     host,
+    server,
   };
 }
 
@@ -202,19 +211,43 @@ describe("WebSocketController", function () {
     assert.strictEqual(remainingWeb.listCalls, 3);
   });
 
-  it("closes all tracked websocket clients without clearing the maps", function () {
-    const { controller } = createController();
+  it("closes tracked websocket clients and the server without clearing the maps", async function () {
+    const { controller, server } = createController();
     const app = createClient(10, "runtime");
     const web = createClient(20, "Driver");
     controller.websocketAppClients.set(10, app);
     controller.webClients.set(20, web);
 
-    controller.close();
+    await controller.close();
 
     assert.strictEqual(app.closeCalls, 1);
     assert.strictEqual(web.closeCalls, 1);
+    assert.strictEqual(server.closeCalls, 1);
     assert.strictEqual(controller.websocketAppClients.has(10), true);
     assert.strictEqual(controller.webClients.has(20), true);
+  });
+
+  it("reuses one close promise for concurrent and reentrant close calls", async function () {
+    const { controller, server } = createController();
+    let reentrantClosePromise;
+    const app = {
+      closeCalls: 0,
+      close() {
+        this.closeCalls++;
+        reentrantClosePromise = controller.close();
+      },
+    };
+    controller.websocketAppClients.set(10, app);
+
+    const firstClose = controller.close();
+    const secondClose = controller.close();
+
+    assert.strictEqual(secondClose, firstClose);
+    await firstClose;
+
+    assert.strictEqual(reentrantClosePromise, firstClose);
+    assert.strictEqual(app.closeCalls, 1);
+    assert.strictEqual(server.closeCalls, 1);
   });
 
   it("accepts registered connections, sends RoomJoined, emits connection events, and refreshes lists", async function () {
