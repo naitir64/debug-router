@@ -70,7 +70,7 @@ function createDevice(snapshot, connector) {
         calls: state.stopWatchCalls,
       });
     },
-    disConnect() {
+    disconnect() {
       state.disconnectCalls++;
       connector.record("device-disconnect", {
         serial: snapshot.serial,

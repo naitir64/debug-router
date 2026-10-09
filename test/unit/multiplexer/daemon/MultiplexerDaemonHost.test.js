@@ -125,7 +125,7 @@ function createDevice(serial, overrides = {}) {
     stopWatchClient() {
       state.stopWatchCalls++;
     },
-    disConnect() {
+    disconnect() {
       state.disconnectCalls++;
     },
   };
@@ -1941,6 +1941,48 @@ describe("MultiplexerDaemonHost", function () {
     assert.strictEqual(device.state.stopWatchCalls, 1);
   });
 
+  it("stopDeviceClientWatcher cancels an in-flight watcher startup without restarting it", async function () {
+    const deferred = createDeferred();
+    const { host, physical } = createHost({
+      startWatchClientImpl: async (device, shouldStart) => {
+        await deferred.promise;
+        if (shouldStart()) {
+          device.startWatchClient();
+        }
+      },
+    });
+    const device = createDevice("device-1");
+    physical.devices.set(device.serial, device);
+
+    const starting = host.handleControlRpc(
+      1,
+      createRpcRequest("startDeviceClientWatcher", {
+        deviceId: "device-1",
+      })
+    );
+    await nextTick();
+    const stopping = host.handleControlRpc(
+      1,
+      createRpcRequest("stopDeviceClientWatcher", {
+        deviceId: "device-1",
+      })
+    );
+
+    deferred.resolve();
+    await Promise.all([starting, stopping]);
+
+    assert.strictEqual(device.state.startWatchCalls, 0);
+    assert.strictEqual(device.state.stopWatchCalls, 1);
+    assert.strictEqual(
+      host.clientWatcherStartedDeviceIds.has("device-1"),
+      false
+    );
+    assert.strictEqual(
+      host.clientWatcherStartingByDeviceId.has("device-1"),
+      false
+    );
+  });
+
   it("disconnectDevice clears watcher state, delegates device disconnect, and ignores missing devices", async function () {
     const { host, physical } = createHost();
     const device = createDevice("device-1");
@@ -2181,6 +2223,118 @@ describe("MultiplexerDaemonHost", function () {
     );
     assert.deepStrictEqual(physical.closeClientCalls, [12]);
     assert.strictEqual(client.state.closeCalls, 1);
+  });
+
+  it("sendMessageWithReply forwards Initialize before rejecting it as not routable", async function () {
+    const { host, physical } = createHost();
+    const client = createClient(12);
+    const message = {
+      event: "Initialize",
+      data: 12,
+    };
+    physical.usbClients.set(client.clientId(), client);
+
+    await assert.rejects(
+      () =>
+        host.handleControlRpc(
+          1,
+          createRpcRequest("sendMessageWithReply", {
+            clientId: 12,
+            message,
+          })
+        ),
+      (error) => {
+        assertControlError(
+          error,
+          "multiplexer-message-not-routable",
+          /safe integer inner message id/
+        );
+        return true;
+      }
+    );
+
+    assert.deepStrictEqual(client.state.sendMessageCalls, [message]);
+    assert.strictEqual(host.pendingRoutes.get(1), null);
+  });
+
+  it("sendMessageWithReply forwards an ID-less Customized message before rejecting it", async function () {
+    const { host, physical } = createHost();
+    const client = createClient(13);
+    const message = createCustomizedEnvelope({
+      id: undefined,
+      clientId: 13,
+    });
+    physical.usbClients.set(client.clientId(), client);
+
+    await assert.rejects(
+      () =>
+        host.handleControlRpc(
+          1,
+          createRpcRequest("sendMessageWithReply", {
+            clientId: 13,
+            message,
+          })
+        ),
+      (error) => {
+        assertControlError(
+          error,
+          "multiplexer-message-not-routable",
+          /safe integer inner message id/
+        );
+        return true;
+      }
+    );
+
+    assert.deepStrictEqual(
+      readCustomizedInner(client.state.sendMessageCalls[0]),
+      {
+        method: "Runtime.evaluate",
+        params: {},
+      }
+    );
+    assert.strictEqual(host.pendingRoutes.get(1), null);
+  });
+
+  it("sendMessageWithReply rejects ID-less memoized queries while forwarding, pending, and cached", async function () {
+    const { host, physical } = createHost({
+      memoizedNotificationTtlMs: 100,
+    });
+    const controlServer = attachControlServer(host);
+    const client = createClient(14);
+    const message = createCustomizedEnvelope({
+      id: undefined,
+      clientId: 14,
+      type: "ListSession",
+    });
+    physical.usbClients.set(client.clientId(), client);
+    const send = () =>
+      host.handleControlRpc(
+        1,
+        createRpcRequest("sendMessageWithReply", {
+          clientId: 14,
+          message,
+        })
+      );
+    const assertNotRoutable = (promise) =>
+      assert.rejects(promise, (error) => {
+        assertControlError(
+          error,
+          "multiplexer-message-not-routable",
+          /safe integer inner message id/
+        );
+        return true;
+      });
+
+    await assertNotRoutable(send());
+    await assertNotRoutable(send());
+    assert.strictEqual(client.state.sendMessageCalls.length, 1);
+
+    host.handlePhysicalMessage(14, createSessionListMessage(14, []));
+    await assertNotRoutable(send());
+
+    assert.strictEqual(client.state.sendMessageCalls.length, 1);
+    assert.strictEqual(controlServer.targeted.length, 1);
+    assert.strictEqual(controlServer.targeted[0].controlId, 1);
   });
 
   it("sendMessageWithReply rejects when Host cannot find the runtime client", async function () {

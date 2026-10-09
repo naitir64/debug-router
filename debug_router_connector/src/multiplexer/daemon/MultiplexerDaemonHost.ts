@@ -697,13 +697,19 @@ export class MultiplexerDaemonHost {
     // Concurrent facade requests share one watcher startup per physical device.
     const existing = this.clientWatcherStartingByDeviceId.get(deviceId);
     if (existing) return existing;
-    const starting = Promise.resolve()
+    let starting!: Promise<void>;
+    const isCurrentAttempt = () => {
+      return this.clientWatcherStartingByDeviceId.get(deviceId) === starting;
+    };
+    starting = Promise.resolve()
       .then(async () => {
         await this.physicalConnector.startWatchClient(
           device,
-          () => this.legacyOwnershipAttached,
+          () => this.legacyOwnershipAttached && isCurrentAttempt(),
         );
-        this.clientWatcherStartedDeviceIds.add(deviceId);
+        if (isCurrentAttempt()) {
+          this.clientWatcherStartedDeviceIds.add(deviceId);
+        }
       })
       .finally(() => {
         // An older startup must not remove the entry for a newer attempt.
@@ -757,7 +763,7 @@ export class MultiplexerDaemonHost {
 
   private disconnectDevice(params: ControlRpcParams["disconnectDevice"]): void {
     this.clearClientWatcherStartState(params.deviceId);
-    this.physicalConnector.devices.get(params.deviceId)?.disConnect();
+    this.physicalConnector.devices.get(params.deviceId)?.disconnect();
   }
 
   private closeClient(clientId: number): void {
@@ -929,6 +935,19 @@ export class MultiplexerDaemonHost {
     params: ControlRpcParams["sendMessageWithReply"],
     controlId: number,
   ): Promise<ResponseMessageType> {
+    if (!getRoutableCustomizedPayload(params.message)) {
+      this.sendMessageToRuntime(params.clientId, params.message, {
+        kind: "control",
+        requesterId: controlId,
+        clientId: params.clientId,
+      });
+      throw {
+        code: "multiplexer-message-not-routable",
+        message:
+          "sendMessageWithReply requires a Customized message with a safe integer inner message id",
+      };
+    }
+
     // Keep the RPC pending until the runtime response resolves this daemon-side Promise.
     return new Promise<ResponseMessageType>((resolve, reject) => {
       this.sendMessageToRuntime(params.clientId, params.message, {
@@ -1276,14 +1295,13 @@ export class MultiplexerDaemonHost {
     data: any,
     target: PendingTargetSeed,
   ): PendingRoute | null {
-    const customized = getCustomizedPayload(data);
-    const originalId = getValidMessageId(customized?.message);
-    if (!customized || originalId === null) {
+    const customized = getRoutableCustomizedPayload(data);
+    if (!customized) {
       return null;
     }
     const route = this.pendingRoutes.add({
       ...target,
-      originalId,
+      originalId: customized.message.id,
       clientId: target.clientId,
     });
     customized.message.id = route.globalMessageId;
@@ -1596,6 +1614,14 @@ function writeCustomizedMessage(payload: CustomizedPayload): void {
   if (payload.messageWasString) {
     payload.container.message = JSON.stringify(payload.message);
   }
+}
+
+function getRoutableCustomizedPayload(data: any): CustomizedPayload | null {
+  const customized = getCustomizedPayload(data);
+  if (!customized || getValidMessageId(customized.message) === null) {
+    return null;
+  }
+  return customized;
 }
 
 function getValidMessageId(message: any | null | undefined): number | null {
