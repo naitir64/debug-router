@@ -556,6 +556,7 @@ function createHost(options = {}) {
     websocketOption: options.websocketOption,
     connectionTrace: options.connectionTrace,
     multiplexerDaemonIdleTimeout: options.multiplexerDaemonIdleTimeout ?? -1,
+    webSocketStartTimeoutMs: options.webSocketStartTimeoutMs,
     memoizedNotificationTtlMs: options.memoizedNotificationTtlMs,
     now: options.now ?? (() => 1000),
   });
@@ -2576,6 +2577,21 @@ describe("MultiplexerDaemonHost", function () {
     assert.strictEqual(driver.state.closeCalls, 0);
   });
 
+  it("closes WebSocket Driver clients through closeClient", async function () {
+    const { host, physical } = createHost({ enableWebSocket: true });
+    const driver = createWebSocketClient(94, "Driver");
+    const { controller } = createWebSocketControllerState([], [driver]);
+    host.webSocketController = controller;
+
+    await host.handleControlRpc(
+      1,
+      createRpcRequest("closeClient", { clientId: 94 })
+    );
+
+    assert.strictEqual(driver.state.closeCalls, 1);
+    assert.deepStrictEqual(physical.closeClientCalls, []);
+  });
+
   it("startWSServer rejects when websocket is disabled", async function () {
     const disabled = createHost({
       enableWebSocket: false,
@@ -2988,6 +3004,84 @@ describe("MultiplexerDaemonHost", function () {
       assert.strictEqual(host.webSocketController, null);
       assert.strictEqual(host.webSocketServerStarted, false);
       assert.strictEqual(host.webSocketServerStarting, null);
+    } finally {
+      reset();
+    }
+  });
+
+  it("rejects startWSServer when the WebSocket controller reports a startup error", async function () {
+    const instances = [];
+    class FakeWebSocketController {
+      constructor(_controllerHost, option) {
+        this.closeCalls = 0;
+        instances.push(this);
+        option.callback(new Error("websocket listen failed"));
+      }
+
+      close() {
+        this.closeCalls++;
+      }
+    }
+    const reset = replaceWebSocketStartDependencies({
+      detectPortImpl: async () => 19001,
+      addressImpl: () => "127.0.0.1",
+      WebSocketControllerCtor: FakeWebSocketController,
+    });
+    const { host } = createHost({
+      enableWebSocket: true,
+    });
+
+    try {
+      await assert.rejects(
+        host.handleControlRpc(1, createRpcRequest("startWSServer", {})),
+        /websocket listen failed/
+      );
+
+      assert.strictEqual(instances.length, 1);
+      assert.strictEqual(instances[0].closeCalls, 1);
+      assert.strictEqual(host.webSocketController, null);
+      assert.strictEqual(host.webSocketServerStarted, false);
+      assert.strictEqual(host.webSocketServerStarting, null);
+      assert.strictEqual(host.webSocketRequesterControlIds.size, 0);
+    } finally {
+      reset();
+    }
+  });
+
+  it("rejects startWSServer when WebSocket listening times out", async function () {
+    const instances = [];
+    class FakeWebSocketController {
+      constructor() {
+        this.closeCalls = 0;
+        instances.push(this);
+      }
+
+      close() {
+        this.closeCalls++;
+      }
+    }
+    const reset = replaceWebSocketStartDependencies({
+      detectPortImpl: async () => 19001,
+      addressImpl: () => "127.0.0.1",
+      WebSocketControllerCtor: FakeWebSocketController,
+    });
+    const { host } = createHost({
+      enableWebSocket: true,
+      webSocketStartTimeoutMs: 10,
+    });
+
+    try {
+      await assert.rejects(
+        host.handleControlRpc(1, createRpcRequest("startWSServer", {})),
+        /Timed out after 10ms waiting for WebSocket server startup/
+      );
+
+      assert.strictEqual(instances.length, 1);
+      assert.strictEqual(instances[0].closeCalls, 1);
+      assert.strictEqual(host.webSocketController, null);
+      assert.strictEqual(host.webSocketServerStarted, false);
+      assert.strictEqual(host.webSocketServerStarting, null);
+      assert.strictEqual(host.webSocketRequesterControlIds.size, 0);
     } finally {
       reset();
     }

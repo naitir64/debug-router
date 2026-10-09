@@ -5,6 +5,7 @@
 import { WebSocket, WebSocketServer } from "ws";
 import { WebSocketClientInfo, WebSocketClient } from "./WebSocketConnection";
 import { getDriverReportService } from "../report/interface/DriverReportService";
+import { defaultLogger } from "../utils/logger";
 import { DebugerRouterDriverEvents } from "../utils/type";
 import type { MultiplexerDaemonHost } from "../multiplexer/daemon/MultiplexerDaemonHost";
 
@@ -27,7 +28,7 @@ export class WebSocketController {
       port: number;
       host: string;
       roomId?: string;
-      callback?: () => void;
+      callback?: (error?: Error) => void;
     },
   ) {
     this.controllerHost = host;
@@ -44,15 +45,33 @@ export class WebSocketController {
       return request.url?.startsWith("/mdevices/page/android") ?? false;
     };
 
-    wsService.on("listening", () => {
+    let startupSettled = false;
+    const onListening = () => {
+      if (startupSettled) {
+        return;
+      }
+      startupSettled = true;
+      wsService.off("listening", onListening);
       getDriverReportService()?.report("websocket_server_init_result", null, {
         result: "success",
         port: this.port,
       });
-      if (option.callback) {
-        option.callback();
+      option.callback?.();
+    };
+    const onError = (error: Error) => {
+      if (startupSettled) {
+        defaultLogger.warn(
+          `WebSocket server error after startup on port ${this.port}: ${error.message}`,
+        );
+        return;
       }
-    });
+      startupSettled = true;
+      wsService.off("listening", onListening);
+      option.callback?.(error);
+    };
+
+    wsService.on("listening", onListening);
+    wsService.on("error", onError);
     wsService.on("connection", this.handleConnection.bind(this));
     wsService.on("close", this.handleServerClose.bind(this));
     this.server = wsService;

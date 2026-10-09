@@ -4,10 +4,18 @@
 
 const assert = require("assert");
 const { EventEmitter } = require("events");
+const path = require("path");
+const rewire = require(require.resolve("rewire", {
+  paths: [path.join(__dirname, "../../../../debug_router_connector")],
+}));
 
-const {
-  WebSocketController,
-} = require("../../../../debug_router_connector/dist/cjs/src/websocket/WebSocketServer");
+const webSocketServerModule = rewire(
+  path.join(
+    __dirname,
+    "../../../../debug_router_connector/dist/cjs/src/websocket/WebSocketServer"
+  )
+);
+const { WebSocketController } = webSocketServerModule;
 
 function createSocket() {
   const socket = new EventEmitter();
@@ -248,6 +256,38 @@ describe("WebSocketController", function () {
     assert.strictEqual(reentrantClosePromise, firstClose);
     assert.strictEqual(app.closeCalls, 1);
     assert.strictEqual(server.closeCalls, 1);
+  });
+
+  it("reports startup errors through the callback", async function () {
+    class FakeWebSocketServer extends EventEmitter {}
+    const wsImport = webSocketServerModule.__get__("ws_1");
+    const originalWebSocketServer = wsImport.WebSocketServer;
+    wsImport.WebSocketServer = FakeWebSocketServer;
+
+    try {
+      let callbackCalls = 0;
+      const startupError = new Error("websocket startup failed");
+      const startupErrorPromise = new Promise((resolve) => {
+        const controller = new WebSocketController(
+          {},
+          {
+            port: 19001,
+            host: "127.0.0.1:19001",
+            callback(error) {
+              callbackCalls++;
+              resolve(error);
+            },
+          }
+        );
+        controller.server.emit("error", startupError);
+      });
+      const startupErrorResult = await startupErrorPromise;
+
+      assert.strictEqual(startupErrorResult, startupError);
+      assert.strictEqual(callbackCalls, 1);
+    } finally {
+      wsImport.WebSocketServer = originalWebSocketServer;
+    }
   });
 
   it("accepts registered connections, sends RoomJoined, emits connection events, and refreshes lists", async function () {

@@ -46,6 +46,7 @@ import {
 } from "../../trace/ConnectionTraceRecorder";
 
 const DEFAULT_DEV_SERVE_PORT = 19783;
+const DEFAULT_WEBSOCKET_START_TIMEOUT_MS = 5000;
 
 export type PendingTargetSeed = {
   /**
@@ -105,10 +106,11 @@ export type MultiplexerDaemonHostOption = {
    * | memoizedNotificationTtlMs     | Cache/pending validity and retry interval, in ms.   |
    *
    * Test or embedding overrides:
-   * | Option            | Description                                        |
-   * | ----------------- | -------------------------------------------------- |
-   * | physicalConnector | Physical connector instance to use instead of new. |
-   * | now               | Clock function; defaults to Date.now.              |
+   * | Option                   | Description                                        |
+   * | ------------------------ | -------------------------------------------------- |
+   * | physicalConnector        | Physical connector instance to use instead of new. |
+   * | webSocketStartTimeoutMs  | WebSocket startup timeout; defaults to 5000 ms.    |
+   * | now                      | Clock function; defaults to Date.now.              |
    */
   controlEndpoint: string;
   protocolVersion: number;
@@ -126,6 +128,7 @@ export type MultiplexerDaemonHostOption = {
 
   // only used for tests or embedding
   physicalConnector?: PhysicalConnector;
+  webSocketStartTimeoutMs?: number;
   now?: () => number;
 };
 
@@ -758,9 +761,14 @@ export class MultiplexerDaemonHost {
   }
 
   private closeClient(clientId: number): void {
-    const websocketClient = this.getWebSocketAppClients()?.get(clientId);
-    if (websocketClient) {
-      websocketClient.close();
+    const websocketAppClient = this.getWebSocketAppClients()?.get(clientId);
+    if (websocketAppClient) {
+      websocketAppClient.close();
+      return;
+    }
+    const websocketWebClient = this.getWebSocketWebClients()?.get(clientId);
+    if (websocketWebClient) {
+      websocketWebClient.close();
       return;
     }
     this.physicalConnector.closeClient(clientId);
@@ -873,13 +881,45 @@ export class MultiplexerDaemonHost {
       port: "wssPort:" + wssHost,
     });
 
-    await new Promise<void>((resolve) => {
-      this.webSocketController = new WebSocketController(this, {
-        port: wssPort,
-        host: wssHost,
-        roomId: this.option.websocketOption?.roomId,
-        callback: resolve,
-      });
+    const startTimeoutMs =
+      this.option.webSocketStartTimeoutMs ?? DEFAULT_WEBSOCKET_START_TIMEOUT_MS;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(
+          new Error(
+            `Timed out after ${startTimeoutMs}ms waiting for WebSocket server startup`,
+          ),
+        );
+      }, startTimeoutMs);
+
+      const settle = (error?: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      };
+
+      try {
+        this.webSocketController = new WebSocketController(this, {
+          port: wssPort,
+          host: wssHost,
+          roomId: this.option.websocketOption?.roomId,
+          callback: settle,
+        });
+      } catch (error) {
+        settle(error instanceof Error ? error : new Error(String(error)));
+      }
     });
     return info;
   }
