@@ -424,7 +424,9 @@ export class DebugRouterConnector {
   }
 
   /** TODO: Subscribe to daemon-owned connection traces; currently returns a no-op unsubscribe. */
-  onConnectionTrace(_listener: (node: ConnectionTraceNode) => void): () => void {
+  onConnectionTrace(
+    _listener: (node: ConnectionTraceNode) => void,
+  ): () => void {
     return () => {};
   }
 
