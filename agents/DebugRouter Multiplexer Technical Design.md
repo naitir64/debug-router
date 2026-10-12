@@ -521,6 +521,8 @@ Local mirror synchronization rules:
 2. Use `ip.address()` to build the host and return `WebSocketServerInfo`.
 3. Create `WebSocketController` and listen on `/mdevices/page/android`.
 
+The Connector facade forwards each enabled `startWSServer()` call to Host. Its existing desired-start state allows snapshots arriving before the RPC response to be exposed locally; startup idempotency and requester tracking belong to Host. Failed startup RPCs clear local WebSocket client mirrors and schedule recovery.
+
 Concurrent requesters share one `webSocketServerStarting` Promise. Host marks the server started and stores `WebSocketServerInfo` only after that Promise succeeds. If startup fails, it removes the current requester, clears and closes the partially created controller, and clears the in-flight Promise so a later request can retry; fields that were never committed as started do not need duplicate reset assignments.
 
 After startup, the shared WebSocket server remains running even when every control that requested it disconnects. Requester removal stops requester-targeted WebSocket snapshots and prevents that facade from exposing shared WebSocket state or messages; the server is closed together with the daemon during idle shutdown, explicit shutdown, or replacement.

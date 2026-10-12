@@ -4,6 +4,8 @@
 
 import { WebSocket, WebSocketServer } from "ws";
 import { WebSocketClientInfo, WebSocketClient } from "./WebSocketConnection";
+import { UsbClient } from "../usb/Client";
+import { BaseDevice } from "../device/BaseDevice";
 import { getDriverReportService } from "../report/interface/DriverReportService";
 import { defaultLogger } from "../utils/logger";
 import { DebugerRouterDriverEvents } from "../utils/type";
@@ -226,11 +228,11 @@ export class WebSocketController {
     });
   }
 
-  getAllUsbClients() {
+  getAllUsbClients(): UsbClient[] {
     return this.controllerHost.getAllUsbClients();
   }
 
-  getAllDevices() {
+  getAllDevices(): Promise<BaseDevice[]> {
     return this.controllerHost.getDevices();
   }
 

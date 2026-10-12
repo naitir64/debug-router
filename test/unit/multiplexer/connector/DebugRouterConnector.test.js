@@ -99,18 +99,6 @@ function createCustomizedMessage(method, params = {}, sessionId = 1) {
   });
 }
 
-function createWebMessage(type, clientId = 1) {
-  return JSON.stringify({
-    event: "Customized",
-    data: {
-      type,
-      data: {
-        client_id: clientId,
-      },
-    },
-  });
-}
-
 function collect(connector, event) {
   const payloads = [];
   connector.on(event, (payload) => payloads.push(payload));
@@ -841,8 +829,14 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("cleans the local USB mirror after a client disconnects", function () {
+  it("requires force to remove a local USB mirror through the public API", function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    const warnings = [];
+    defaultLogger.setOutput((level, ...messages) => {
+      if (level === "warn") {
+        warnings.push(messages.join(" "));
+      }
+    });
     try {
       const connector = new DebugRouterConnector({
         manualConnect: true,
@@ -861,6 +855,16 @@ describe("DebugRouterConnector multiplexer facade", function () {
       connector.selecteUsbClient(1);
 
       connector.unregiserUsbClient(1);
+      connector.unregiserUsbClient(1, false);
+
+      assert.strictEqual(connector.usbClients.has(1), true);
+      assert.strictEqual(connector.selectedClient, connector.usbClients.get(1));
+      assert.deepStrictEqual(clientDisconnected, []);
+      assert.deepStrictEqual(appClientDisconnected, []);
+      assert.strictEqual(warnings.length, 2);
+      assert.ok(warnings.every((message) => message.includes("force is true")));
+
+      connector.unregiserUsbClient(1, true);
 
       assert.strictEqual(connector.usbClients.has(1), false);
       assert.strictEqual(connector.selectedClient, undefined);
@@ -1183,7 +1187,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("routes USB and websocket messages through local mirrors and daemon RPCs", async function () {
+  it("dispatches daemon USB messages through local mirrors without sending RPCs", function () {
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
     try {
       const connector = new DebugRouterConnector({
@@ -1217,12 +1221,6 @@ describe("DebugRouterConnector multiplexer facade", function () {
         event: "client-message",
         data: { source: "usb-runtime", id: 404, message: "not-json" },
       });
-      connector.handleWsMessage(404, createWebMessage("CDP", 3));
-      connector.handleWsMessage(1, createWebMessage("UsbConnect", 3));
-      connector.handleWsMessage(1, createWebMessage("UsbConnectAck", 3));
-      connector.handleWsMessage(1, createWebMessage("CDP", 3));
-      connector.handleWsMessage(1, createWebMessage("CDP", 0));
-
       assert.deepStrictEqual(
         usbMessages.map((item) => item.id),
         [1]
@@ -1237,20 +1235,60 @@ describe("DebugRouterConnector multiplexer facade", function () {
           },
         ],
       ]);
-      assert.deepStrictEqual(
-        state.clients[0].calls
-          .filter(
-            (call) =>
-              call.method === "sendMessageWithoutReply" &&
-              call.params.target === "app"
-          )
-          .map((call) => JSON.parse(call.params.message).data.data.client_id),
-        [-1, 0]
-      );
-      assert.throws(
-        () => connector.handleWsMessage(1, "not-json"),
-        SyntaxError
-      );
+      assert.deepStrictEqual(state.clients[0].calls, []);
+    } finally {
+      restore();
+    }
+  });
+
+  it("retains watchNetworkDeviceAtIp as a warning-only TODO stub", async function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    const warnings = [];
+    defaultLogger.setOutput((level, ...messages) => {
+      if (level === "warn") warnings.push(messages.join(" "));
+    });
+    const connector = new DebugRouterConnector({ manualConnect: true });
+    try {
+      const watching = connector.watchNetworkDeviceAtIp({
+        ip: "127.0.0.1",
+        port: [9001],
+      });
+      assert.ok(watching instanceof Promise);
+      assert.strictEqual(await watching, undefined);
+      assert.deepStrictEqual(state.clients[0].calls, []);
+      assert.strictEqual(state.connectCalls, 0);
+      assert.strictEqual(connector.desiredRecoveryTimer, null);
+      assert.strictEqual(warnings.length, 1);
+      assert.ok(warnings[0].includes("watchNetworkDeviceAtIp"));
+    } finally {
+      await connector.close();
+      restore();
+    }
+  });
+
+  it("warns without parsing or forwarding deprecated handleWsMessage calls", function () {
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes();
+    const warnings = [];
+    defaultLogger.setOutput((level, ...messages) => {
+      if (level === "warn") {
+        warnings.push(messages.join(" "));
+      }
+    });
+    try {
+      const connector = new DebugRouterConnector({ manualConnect: true });
+      connector.applySnapshot({
+        protocolVersion: 1,
+        generatedAt: 1,
+        devices: [createDeviceSnapshot()],
+        clients: [createClientSnapshot()],
+      });
+
+      connector.handleWsMessage(1, createCustomizedMessage("Runtime.enable"));
+      assert.doesNotThrow(() => connector.handleWsMessage(1, "not-json"));
+
+      assert.deepStrictEqual(state.clients[0].calls, []);
+      assert.strictEqual(warnings.length, 2);
+      assert.ok(warnings.every((message) => message.includes("handleWsMessage")));
     } finally {
       restore();
     }
@@ -1325,6 +1363,81 @@ describe("DebugRouterConnector multiplexer facade", function () {
         },
       ]);
     } finally {
+      restore();
+    }
+  });
+
+  for (const fails of [false, true]) {
+    it(`forwards concurrent websocket starts and ${fails ? "clears mirrors on shared failure" : "preserves snapshots on shared success"}`, async function () {
+      let resolveStart;
+      let rejectStart;
+      const sharedStart = new Promise((resolve, reject) => {
+        resolveStart = resolve;
+        rejectStart = reject;
+      });
+      const { DebugRouterConnector, state, restore } = loadConnectorWithFakes({
+        results: [["startWSServer", () => sharedStart]],
+      });
+      const connector = new DebugRouterConnector({
+        manualConnect: true,
+        enableWebSocket: true,
+      });
+      try {
+        const starts = [connector.startWSServer(), connector.startWSServer()];
+        const completed = fails
+          ? Promise.all(starts.map((start) => assert.rejects(start, /startup failed/)))
+          : Promise.all(starts);
+        assert.strictEqual(state.clients[0].calls.length, 2);
+        connector.applySnapshot({
+          protocolVersion: 1,
+          generatedAt: 1,
+          devices: [],
+          clients: [],
+          websocketAppClients: [createWebSocketSnapshot({ id: 100 })],
+          websocketWebClients: [],
+        });
+        assert.strictEqual(connector.getAllWebsocketAppClients().length, 1);
+        if (fails) {
+          rejectStart(new Error("startup failed"));
+        } else {
+          resolveStart({ port: 8888, host: "127.0.0.1:8888" });
+        }
+        await completed;
+        assert.strictEqual(connector.getAllWebsocketAppClients().length, fails ? 0 : 1);
+        if (fails) {
+          assert.strictEqual(connector.wss, null);
+          assert.notStrictEqual(connector.desiredRecoveryTimer, null);
+        } else {
+          assert.strictEqual(connector.wssPort, 8888);
+        }
+      } finally {
+        await connector.close();
+        restore();
+      }
+    });
+  }
+
+  it("does not restore websocket state when a pending start completes after close", async function () {
+    let finishStart;
+    const { DebugRouterConnector, state, restore } = loadConnectorWithFakes({
+      results: [["startWSServer", () => new Promise((resolve) => {
+        finishStart = resolve;
+      })]],
+    });
+    const connector = new DebugRouterConnector({
+      manualConnect: true,
+      enableWebSocket: true,
+    });
+    try {
+      const started = connector.startWSServer();
+      await connector.close();
+      finishStart({ port: 8888, host: "127.0.0.1:8888" });
+      await started;
+      await connector.startWSServer();
+      assert.strictEqual(connector.wss, null);
+      assert.strictEqual(state.clients[0].calls.length, 1);
+    } finally {
+      await connector.close();
       restore();
     }
   });
@@ -2086,17 +2199,26 @@ describe("DebugRouterConnector multiplexer facade", function () {
     }
   });
 
-  it("creates bounded local driver client ids and exposes the driver client", function () {
+  it("keeps the compatibility driver id and warns instead of allocating client ids", function () {
     const { DebugRouterConnector, restore } = loadConnectorWithFakes();
+    const warnings = [];
+    defaultLogger.setOutput((level, ...messages) => {
+      if (level === "warn") {
+        warnings.push(messages.join(" "));
+      }
+    });
     try {
       const connector = new DebugRouterConnector({
         manualConnect: true,
       });
 
-      assert.ok(connector.getDriverClient());
-      assert.strictEqual(connector.createClientId(), 2);
-      connector.nextClientId = 4294967295;
-      assert.strictEqual(connector.createClientId(), 1);
+      assert.strictEqual(connector.getDriverClient().clientId(), 1);
+      assert.deepStrictEqual(warnings, []);
+      assert.strictEqual(connector.createClientId(), -1);
+      assert.strictEqual(connector.createClientId(), -1);
+      assert.strictEqual(warnings.length, 2);
+      assert.ok(warnings.every((message) => message.includes("createClientId")));
+      assert.strictEqual(connector.getDriverClient().clientId(), 1);
     } finally {
       restore();
     }
