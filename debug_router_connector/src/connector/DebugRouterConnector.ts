@@ -10,7 +10,10 @@ import {
 import path from "path";
 import { DeviceManager } from "../device/DeviceManager";
 import type { PhysicalConnectorOption } from "../physical/PhysicalConnector";
-import type { ConnectionTraceOptions } from "../trace/ConnectionTraceRecorder";
+import type {
+  ConnectionTraceNode,
+  ConnectionTraceOptions,
+} from "../trace/ConnectionTraceRecorder";
 import { defaultLogger } from "../utils/logger";
 import { driver_dir } from "../utils/file_lock";
 import { DebugerRouterDriverEvents, DeviceOS } from "../utils/type";
@@ -61,6 +64,7 @@ type WebSocketServerCompat = {
  * | Option                       | Description                                                        |
  * | ---------------------------- | ------------------------------------------------------------------ |
  * | manualConnect                | Skip automatic connectDevices() on construction; defaults to false. |
+ * | reportService                | Caller-supplied reporting service; null/omitted disables this facade. |
  * | enableAndroid                | Expose Android devices and clients; defaults to true.               |
  * | enableIOS                    | Expose iOS devices and clients; defaults to true; macOS/Windows only. |
  * | enableHarmony                | Expose Harmony devices and clients; defaults to true.               |
@@ -95,6 +99,15 @@ type WebSocketServerCompat = {
  * Capability flags normally filter this facade's mirrors and events. Transport,
  * WebSocket, trace, and idle options configure a newly spawned shared daemon;
  * later facades do not reconfigure an already running daemon.
+ *
+ * About reportService:
+ * The service stays in the Connector process and is not passed to the daemon.
+ * Each facade initializes its supplied service with manualConnect and retains
+ * that instance. Initialization errors propagate to the constructor caller.
+ * Reconnecting a facade does not initialize the service again; constructing
+ * another facade does, even when the same service object is supplied.
+ * The daemon forwards each report to one connected reporting-enabled facade.
+ * Null or omitted reportService disables reporting only for this facade.
  *
  * About enableDebugMode:
  * Debug/test-only escape hatch for daemon-global configuration.
@@ -403,6 +416,16 @@ export class DebugRouterConnector {
     callback: (payload: DebugerRouterDriverEvents[Event]) => void,
   ): void {
     this.events.off(event, callback);
+  }
+
+  /** TODO: Query daemon-owned connection traces; currently returns an empty list. */
+  getConnectionTrace(_limit?: number): ConnectionTraceNode[] {
+    return [];
+  }
+
+  /** TODO: Subscribe to daemon-owned connection traces; currently returns a no-op unsubscribe. */
+  onConnectionTrace(_listener: (node: ConnectionTraceNode) => void): () => void {
+    return () => {};
   }
 
   async close(): Promise<void> {
@@ -835,13 +858,11 @@ export class DebugRouterConnector {
     // Translate daemon events into local mirrors and the existing Connector event API.
     switch (event.event) {
       case "report":
-        if (!this.closed) {
-          this.reportService?.report(
-            event.data.eventName,
-            event.data.metrics,
-            event.data.categories,
-          );
-        }
+        this.reportService?.report(
+          event.data.eventName,
+          event.data.metrics,
+          event.data.categories,
+        );
         break;
       case "snapshot":
         // Reconcile device/client mirrors, including clients removed from the snapshot.

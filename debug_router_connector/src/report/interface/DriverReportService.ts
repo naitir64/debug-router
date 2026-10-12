@@ -9,20 +9,16 @@ export interface DriverReportService {
 
 let reportService: DriverReportService | null = null;
 
-// All enabled Connector instances in this module reuse the first initialized
-// service. Closing a Connector must not restart the shared reporting SDK.
 export function initDriverReportService(
   service: DriverReportService | null | undefined,
   manualConnect: boolean | undefined,
 ): DriverReportService | null {
-  if (!service) {
+  if (service == null) {
     return null;
   }
-  if (!reportService) {
-    service.init(manualConnect);
-    reportService = service;
-  }
-  return reportService;
+
+  service.init(manualConnect);
+  return service;
 }
 
 export function setDriverReportService(service: DriverReportService | null) {

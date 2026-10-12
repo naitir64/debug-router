@@ -8,9 +8,6 @@ const {
   waitFor,
   platformTimeout,
 } = require("./helpers/integration_harness");
-const {
-  setDriverReportService,
-} = require("../../../debug_router_connector/dist/cjs/src/report/interface/DriverReportService");
 
 describe("multiplexer integration report service", function () {
   this.timeout(platformTimeout(15000));
@@ -20,23 +17,31 @@ describe("multiplexer integration report service", function () {
   let service;
 
   beforeEach(function () {
-    setDriverReportService(null);
     reports = [];
     initCalls = 0;
-    service = {
+    service = createService("first");
+  });
+
+  function createService(name) {
+    return {
       init() {
         initCalls++;
       },
       report(eventName, metrics, categories) {
-        reports.push({ eventName, metrics, categories, pid: process.pid });
+        reports.push({
+          eventName,
+          metrics,
+          categories,
+          pid: process.pid,
+          service: name,
+        });
       },
     };
-  });
+  }
 
   afterEach(async function () {
     await context?.cleanup();
     context = undefined;
-    setDriverReportService(null);
   });
 
   async function report(eventName) {
@@ -73,20 +78,13 @@ describe("multiplexer integration report service", function () {
     context = createIntegrationContext("reports", {});
     const first = context.createConnector({ reportService: service });
     const second = context.createConnector({
-      reportService: {
-        init() {
-          throw new Error("reinitialized");
-        },
-        report() {
-          throw new Error("wrong service");
-        },
-      },
+      reportService: createService("second"),
     });
     const disabled = context.createConnector();
     await first.connectDevices();
     await second.connectDevices();
     await disabled.connectDevices();
-    assert.strictEqual(initCalls, 1);
+    assert.strictEqual(initCalls, 2);
     assert.strictEqual(
       reports.filter((r) => r.eventName === "fixture-startup-report").length,
       1
@@ -117,14 +115,20 @@ describe("multiplexer integration report service", function () {
     await disabled.close();
     await waitFor(() => lastActiveControlCount() === 0, 2000);
     await report("queued");
-    const later = context.createConnector({ reportService: service });
+    const later = context.createConnector({
+      reportService: createService("later"),
+    });
     await later.connectDevices();
-    assert.strictEqual(initCalls, 1);
+    assert.strictEqual(initCalls, 3);
     assert.deepStrictEqual(
       reports.map((r) => r.eventName),
       ["fixture-startup-report", "first", "second", "disabled", "queued"]
     );
     assert(reports.every((r) => r.pid === process.pid));
+    assert.deepStrictEqual(
+      reports.map((r) => r.service),
+      ["first", "first", "second", "later", "later"]
+    );
     assert.deepStrictEqual(reports[1].metrics, { count: 1 });
     assert.deepStrictEqual(reports[1].categories, { source: "daemon" });
   });

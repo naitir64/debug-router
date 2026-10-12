@@ -37,6 +37,8 @@ export type MultiplexerDaemonClientOption = {
    * daemonManager: Manages daemon startup and readiness before connecting.
    * controlEndpoint: Unix domain socket path or Windows named pipe for control connections.
    * rpcTimeout: Default RPC response timeout in milliseconds; defaults to 5000.
+   * reportServiceEnabled: Whether this client can receive daemon reports; defaults to false.
+   * Advertised on every registration, including reconnects, so Host can select a reporting recipient.
    * debugInfo: Optional diagnostic metadata attached to registration and RPC messages.
    */
   daemonManager: MultiplexerDaemonManager;

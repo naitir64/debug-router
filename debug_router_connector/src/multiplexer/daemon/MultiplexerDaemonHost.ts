@@ -165,6 +165,8 @@ export class MultiplexerDaemonHost {
    * - activeWebSocketDriverIds: WebSocket frontends that also keep the daemon alive.
    */
   private readonly activeControlIds = new Set<number>();
+  // Connected controls with reporting enabled, in registration order.
+  // The first entry receives reports; disconnecting it selects the next entry.
   private readonly reportControlIds = new Set<number>();
   private readonly reportBridge = new DaemonReportServiceBridge(
     (controlId, data) => {
@@ -203,18 +205,12 @@ export class MultiplexerDaemonHost {
     );
     // Install before physical construction so its startup reports are queued.
     setDriverReportService(this.reportBridge);
-    try {
-      this.physicalConnector =
-        option.physicalConnector ??
-        new PhysicalConnector({
-          ...option.physicalConnectorOption,
-          traceRecorder: this.connectionTraceRecorder,
-        });
-    } catch (error) {
-      this.reportBridge.close();
-      setDriverReportService(null);
-      throw error;
-    }
+    this.physicalConnector =
+      option.physicalConnector ??
+      new PhysicalConnector({
+        ...option.physicalConnectorOption,
+        traceRecorder: this.connectionTraceRecorder,
+      });
     this.legacyOwnershipGuard = new LegacyOwnershipGuard({
       legacyDriverDir: option.legacyDriverDir,
       onStatusChanged: this.handleLegacyOwnershipChanged,
@@ -499,9 +495,10 @@ export class MultiplexerDaemonHost {
 
   // Forward reports through one eligible Connector to avoid duplicate reporting.
   private updateReportStatus(): void {
-    const controlId = this.reportControlIds.values().next().value;
+    // Take the first value in the Set, or null when the Set is empty.
+    const [controlId = null] = this.reportControlIds;
     this.reportBridge.updateStatus(
-      controlId !== undefined
+      controlId !== null
         ? { type: "forward", controlId }
         : { type: "disconnected" },
     );

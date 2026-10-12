@@ -6,7 +6,7 @@ import type { DriverReportService } from "../../report/interface/DriverReportSer
 import type { ReportEventData } from "../protocol/event";
 import { defaultLogger } from "../../utils/logger";
 
-export const MAX_REPORT_QUEUE_LENGTH = 1000;
+export const MAX_REPORT_QUEUE_LENGTH = 100;
 
 export type ReportStatus =
   // No connected Connector has reporting enabled.
@@ -36,17 +36,16 @@ export class DaemonReportServiceBridge implements DriverReportService {
       metrics: metrics ?? null,
       categories: categories ?? null,
     };
-    if (this.status.type === "disconnected") {
+    if (this.status.type === "forward") {
+      this.forwardReport(this.status.controlId, data);
+    } else {
+      // No reporting-enabled Connector is available. Buffer reports until
+      // the status becomes forward, then drain them in FIFO order.
       if (this.queue.length >= MAX_REPORT_QUEUE_LENGTH) {
+        // Drop the oldest report to keep at most 100 pending reports.
         this.queue.shift();
       }
       this.queue.push(data);
-    } else {
-      try {
-        this.send(this.status.controlId, data);
-      } catch (error) {
-        defaultLogger.warn(`Failed to forward daemon report: ${String(error)}`);
-      }
     }
   }
 
@@ -56,6 +55,14 @@ export class DaemonReportServiceBridge implements DriverReportService {
     }
     this.status = status;
     this.drain();
+  }
+
+  private forwardReport(controlId: number, data: ReportEventData): void {
+    try {
+      this.send(controlId, data);
+    } catch (error) {
+      defaultLogger.warn(`Failed to forward daemon report: ${String(error)}`);
+    }
   }
 
   private drain(): void {
@@ -68,7 +75,7 @@ export class DaemonReportServiceBridge implements DriverReportService {
         // Dequeue before sending: a failed send is not replayed to another
         // Connector, and synchronous disconnect callbacks can change status.
         const data = this.queue.shift()!;
-        this.report(data.eventName, data.metrics, data.categories);
+        this.forwardReport(this.status.controlId, data);
       }
     } finally {
       this.draining = false;
