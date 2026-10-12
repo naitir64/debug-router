@@ -132,8 +132,7 @@ export class WebSocketClient extends Client {
       }
     } catch (error: any) {
       defaultLogger.debug(
-        "webSocketClient handleCustomizedMessage parse error:" +
-          error?.message,
+        "webSocketClient handleCustomizedMessage parse error:" + error?.message,
       );
     }
   }

@@ -38,9 +38,7 @@ public class MainActivity extends AppCompatActivity implements StateListener {
       Map<String, Object> data = new HashMap<>();
       data.put("ok", true);
       data.put("method", getName());
-      data.put(
-          "params",
-          params == null ? new JSONObject() : new JSONObject(params));
+      data.put("params", params == null ? new JSONObject() : new JSONObject(params));
       return new MessageHandleResult(data);
     }
 

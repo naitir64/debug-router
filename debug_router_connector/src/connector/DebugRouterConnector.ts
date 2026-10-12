@@ -16,7 +16,11 @@ import { driver_dir } from "../utils/file_lock";
 import { DebugerRouterDriverEvents, DeviceOS } from "../utils/type";
 import { Client } from "./Client";
 import { DriverClient } from "./DriverClient";
-import { MultiOpenCallback, MultiOpenStatus } from "./MultiOpenCallBack";
+import {
+  DefaultMultiOpenCallback,
+  MultiOpenCallback,
+  MultiOpenStatus,
+} from "./MultiOpenCallBack";
 import {
   ControlEvent,
   MULTIPLEXER_PROTOCOL_VERSION,
@@ -45,6 +49,53 @@ type WebSocketServerCompat = {
 };
 
 /**
+ * Configuration for the public Connector facade, including inherited
+ * PhysicalConnectorOption fields. The constructor also accepts no options.
+ *
+ * Required options:
+ * No top-level option is required. When an optional object is supplied,
+ * usbConnectOpt.retryTime and networkDeviceOpt.ip / networkDeviceOpt.port
+ * are required within their respective objects.
+ *
+ * Optional options:
+ * | Option                       | Description                                                        |
+ * | ---------------------------- | ------------------------------------------------------------------ |
+ * | manualConnect                | Skip automatic connectDevices() on construction; defaults to false. |
+ * | enableAndroid                | Expose Android devices and clients; defaults to true.               |
+ * | enableIOS                    | Expose iOS devices and clients; defaults to true; macOS/Windows only. |
+ * | enableHarmony                | Expose Harmony devices and clients; defaults to true.               |
+ * | enableDesktop                | Expose desktop devices and clients; defaults to false.              |
+ * | enableNetworkDevice          | Expose configured network devices; defaults to false.               |
+ * | enableWebSocket              | Allow this facade to start/use the shared WebSocket service; false. |
+ * | adbHostPort                  | ADB server endpoint; optional host and port use transport defaults. |
+ * | hdcHostPort                  | HDC server endpoint; optional host and port use transport defaults. |
+ * | usbConnectOpt                | USB connection settings; retryTime is in ms, default/minimum 3000.  |
+ * | networkDeviceOpt             | Network target: required IP and array of debugger client ports.     |
+ * | websocketOption              | Optional shared WebSocket settings; see nested fields below.        |
+ * | websocketOption.port         | Legacy compatibility field; ignored, port selection starts at 19783. |
+ * | websocketOption.roomId       | Optional room identifier returned in WebSocket RoomJoined.          |
+ * | connectionTrace              | Optional daemon-owned tracing: enabled, output, and bufferSize.     |
+ * | connectionTrace.enabled      | Enable tracing; omission follows the trace output/environment rules. |
+ * | connectionTrace.output       | Output file path; WritableStream cannot cross IPC and is ignored.   |
+ * | connectionTrace.bufferSize   | Maximum buffered trace entries; defaults to 2000.                   |
+ * | multiplexerDaemonIdleTimeout | Idle shutdown delay in ms; defaults to 600000; negative disables it. |
+ * | multiplexerStartupTimeout    | Daemon readiness timeout in ms; defaults to 5000.                   |
+ * | multiplexerRpcTimeout        | Default RPC response timeout in ms; defaults to 5000.               |
+ *
+ * Internal debug/test overrides (all optional; normal callers should omit):
+ * | Option                     | Description                                                          |
+ * | -------------------------- | -------------------------------------------------------------------- |
+ * | enableDebugMode            | Replace the shared daemon on ensure and stop it on close; false.      |
+ * | multiplexerRootDir         | Data root; defaults to ~/.DebugRouterConnector.                       |
+ * | multiplexerDataDir         | Full data directory; overrides rootDir/multiplexer.                   |
+ * | multiplexerDaemonEntry     | Alternate daemon entry JS file; defaults to the bundled entry.        |
+ * | multiplexerLegacyDriverDir | Legacy ownership directory; defaults to the existing driver_dir.      |
+ * | traceRecorder              | Inherited in-process PhysicalConnector injection; ignored by facade. |
+ *
+ * Capability flags normally filter this facade's mirrors and events. Transport,
+ * WebSocket, trace, and idle options configure a newly spawned shared daemon;
+ * later facades do not reconfigure an already running daemon.
+ *
  * About enableDebugMode:
  * Debug/test-only escape hatch for daemon-global configuration.
  *
@@ -64,7 +115,6 @@ type WebSocketServerCompat = {
  *   enableDebugMode: true,
  * followed by `await connector.connectDevices()`.
  */
-
 export type DebugRouterConnectorOption = PhysicalConnectorOption & {
   reportService?: DriverReportService | null;
   enableWebSocket?: boolean;
@@ -86,25 +136,26 @@ export type DebugRouterConnectorOption = PhysicalConnectorOption & {
 export type devOption = DebugRouterConnectorOption;
 
 export class DebugRouterConnector {
+  private readonly events = new EventEmitter();
   readonly devices: Map<string, MultiplexerDevice> = new Map();
   readonly usbClients: Map<number, MultiplexerUsbClient> = new Map();
   readonly enableWebSocket;
+  private selectedClient: MultiplexerUsbClient | undefined;
+  private enableAndroid: boolean;
+  private enableIOS: boolean;
+  private enableHarmony: boolean;
+  private enableDesktop: boolean;
+  private readonly enableNetworkDevice: boolean;
+  private readonly driverClient: DriverClient;
+  private multiOpenCallback: MultiOpenCallback = new DefaultMultiOpenCallback();
+  private closed: boolean = false;
   wssPort: number = DEFAULT_DEV_SERVE_PORT;
   wssHost: string | undefined;
   roomId: string | undefined;
   wss: WebSocketServerCompat | null = null;
-
-  private readonly events = new EventEmitter();
   private readonly reportService: DriverReportService | null;
   private readonly daemonClient: MultiplexerDaemonClient;
-  private readonly driverClient: DriverClient;
-  private enableAndroid: boolean;
-  private enableIOS: boolean;
-  private readonly enableHarmony: boolean;
-  private enableDesktop: boolean;
-  private readonly enableNetworkDevice: boolean;
   private readonly enableDebugMode: boolean;
-  private selectedClient: MultiplexerUsbClient | undefined;
   private readonly websocketAppClients: Map<
     number,
     MultiplexerWebSocketClient
@@ -113,12 +164,9 @@ export class DebugRouterConnector {
     number,
     MultiplexerWebSocketClient
   > = new Map();
-  private nextClientId = 0;
-  private multiOpenCallback: MultiOpenCallback | undefined;
   private multiOpenStatus = MultiOpenStatus.unInit;
-  private closed = false;
+  // Keep caller intent across daemon disconnects; these flags do not describe current connectivity.
   private desiredWSServerStarted = false;
-  private startingWSServer: Promise<void> | null = null;
   private desiredDeviceDiscoveryStarted = false;
   private desiredWatchAllClientsStarted = false;
   private desiredRecoveryTimer: NodeJS.Timeout | null = null;
@@ -176,6 +224,7 @@ export class DebugRouterConnector {
       );
     }
 
+    // Configure daemon discovery and startup; connect lazily on the first RPC.
     const paths = createMultiplexerPaths({
       rootDir: option.multiplexerRootDir,
       dataDir: option.multiplexerDataDir,
@@ -219,9 +268,11 @@ export class DebugRouterConnector {
       rpcTimeout: option.multiplexerRpcTimeout,
       reportServiceEnabled: this.reportService !== null,
     });
+    // Apply daemon snapshots/messages to local mirrors; retain cleanup for close().
     this.unsubscribeDaemonEvents = this.daemonClient.subscribe((event) =>
       this.applyHostEvent(event),
     );
+    // On disconnect, clear stale mirrors and schedule reconnection/state recovery.
     this.unsubscribeDaemonConnectionEvent = this.daemonClient.subscribeConnectionEvent(
       (event) => {
         if (event.state === "disconnected") {
@@ -231,8 +282,10 @@ export class DebugRouterConnector {
       },
     );
 
-    this.driverClient = new DriverClient(this.createClientId());
+    // Legacy sender identity only; this is not a daemon-registered runtime client.
+    this.driverClient = new DriverClient(1);
 
+    // Unless manual, start discovery asynchronously and retry through recovery on failure.
     if (!option.manualConnect) {
       void this.connectDevices().catch((error: Error) => {
         defaultLogger.warn(
@@ -278,14 +331,14 @@ export class DebugRouterConnector {
   }
 
   /**
-   * Allocates IDs only for Connector-local compatibility objects.
-   * Real SDK Runtime client IDs are allocated by the daemon.
+   * @deprecated Client IDs are allocated by the daemon.
+   * Retained for compatibility; returns -1 without allocating an ID.
    */
   createClientId(): number {
-    if (this.nextClientId > 4294967294) {
-      this.nextClientId = 0;
-    }
-    return ++this.nextClientId;
+    defaultLogger.warn(
+      "createClientId is unsupported on DebugRouterConnector; client IDs are allocated by the daemon. Returning -1.",
+    );
+    return -1;
   }
 
   async connectDevices(
@@ -318,13 +371,6 @@ export class DebugRouterConnector {
     return this.upsertClientSnapshots(snapshots);
   }
 
-  async watchNetworkDeviceAtIp(options: {
-    ip: string;
-    port: number[];
-  }): Promise<void> {
-    await this.daemonClient.call("watchNetworkDeviceAtIp", options);
-  }
-
   selecteUsbClient(id: number): void {
     if (this.usbClients.has(id)) {
       this.selectedClient = this.usbClients.get(id);
@@ -335,6 +381,14 @@ export class DebugRouterConnector {
     defaultLogger.warn(
       "addDeviceManager is ignored by the Multiplexer-only DebugRouterConnector; physical device managers live in the daemon.",
     );
+  }
+
+  /** Watch network devices through the shared daemon. */
+  async watchNetworkDeviceAtIp(options: {
+    ip: string;
+    port: number[];
+  }): Promise<void> {
+    await this.daemonClient.call("watchNetworkDeviceAtIp", options);
   }
 
   on<Event extends keyof DebugerRouterDriverEvents>(
@@ -352,16 +406,19 @@ export class DebugRouterConnector {
   }
 
   async close(): Promise<void> {
+    // Ignore repeated closes and prevent any further recovery attempts.
     if (this.closed) {
       return;
     }
 
     this.closed = true;
+    // Detach daemon listeners before disconnecting so close cannot trigger recovery.
     this.unsubscribeDaemonEvents?.();
     this.unsubscribeDaemonEvents = undefined;
     this.unsubscribeDaemonConnectionEvent?.();
     this.unsubscribeDaemonConnectionEvent = undefined;
     this.clearDesiredRecoveryTimer();
+    // Debug mode explicitly stops the shared daemon and removes its artifacts.
     if (this.enableDebugMode) {
       try {
         defaultLogger.info(
@@ -376,15 +433,9 @@ export class DebugRouterConnector {
         );
       }
     }
+    // Normally close only this control connection; the daemon owns shared resources.
     await this.daemonClient.close();
     this.wss = null;
-  }
-
-  private clearDesiredRecoveryTimer(): void {
-    if (this.desiredRecoveryTimer) {
-      clearTimeout(this.desiredRecoveryTimer);
-      this.desiredRecoveryTimer = null;
-    }
   }
 
   emit<Event extends keyof DebugerRouterDriverEvents>(
@@ -433,11 +484,17 @@ export class DebugRouterConnector {
   }
 
   /**
-   * Cleans up the local mirror after the client has disconnected.
+   * With force enabled, removes the local USB client mirror.
    * External callers should not invoke this blindly to close a runtime client;
    * use client.close() for that purpose.
    */
-  unregiserUsbClient(id: number): void {
+  unregiserUsbClient(id: number, force: boolean = false): void {
+    if (!force) {
+      defaultLogger.warn(
+        "unregiserUsbClient is ignored unless force is true; client ownership is shared by the daemon.",
+      );
+      return;
+    }
     this.unregisterUsbClientInternal(id);
   }
 
@@ -584,37 +641,14 @@ export class DebugRouterConnector {
     client.handleMessage(message);
   }
 
-  handleWsMessage(id: number, message: string): void {
-    const client = this.usbClients.get(id);
-    if (!client) {
-      return;
-    }
-
-    const data = JSON.parse(message);
-    if (
-      data?.data?.type === "UsbConnect" ||
-      data?.data?.type === "UsbConnectAck"
-    ) {
-      return;
-    }
-    if (data?.data?.data?.client_id) {
-      data.data.data.client_id = -1;
-    }
-    void this.daemonClient
-      .call("sendMessageWithoutReply", {
-        target: "app",
-        clientId: id,
-        message: JSON.stringify(data),
-      })
-      .catch((error: Error) => {
-        defaultLogger.warn(
-          `Failed to route websocket message to app through multiplexer host: ${error.message}`,
-        );
-      });
-  }
-
-  getAllWebsocketAppClients(): MultiplexerWebSocketClient[] {
-    return Array.from(this.websocketAppClients.values());
+  /**
+   * @deprecated WebSocket messages are routed by the daemon.
+   * Retained for compatibility; logs a warning without forwarding the message.
+   */
+  handleWsMessage(_id: number, _message: string): void {
+    defaultLogger.warn(
+      "handleWsMessage is ignored on DebugRouterConnector; WebSocket messages are routed by the daemon.",
+    );
   }
 
   getAllAppClients(): Client[] {
@@ -674,12 +708,15 @@ export class DebugRouterConnector {
   }
 
   async startWSServer(): Promise<void> {
-    if (!this.enableWebSocket) {
+    if (!this.enableWebSocket || this.closed) {
       return;
     }
     this.desiredWSServerStarted = true;
     try {
-      await this.ensureWSServerStarted();
+      const info = await this.daemonClient.call("startWSServer", {});
+      if (!this.closed) {
+        this.applyWebSocketServerInfo(info);
+      }
     } catch (error) {
       this.clearWebSocketClientMirrors();
       this.scheduleDesiredRecovery();
@@ -687,24 +724,12 @@ export class DebugRouterConnector {
     }
   }
 
-  private ensureWSServerStarted(): Promise<void> {
-    if (this.closed) {
-      return Promise.resolve();
-    }
-    if (this.startingWSServer) {
-      return this.startingWSServer;
-    }
+  getDriverClient(): DriverClient {
+    return this.driverClient;
+  }
 
-    this.startingWSServer = this.daemonClient
-      .call("startWSServer", {})
-      .then((info) => {
-        this.applyWebSocketServerInfo(info);
-      })
-      .finally(() => {
-        this.startingWSServer = null;
-      });
-
-    return this.startingWSServer;
+  getAllWebsocketAppClients(): MultiplexerWebSocketClient[] {
+    return Array.from(this.websocketAppClients.values());
   }
 
   private applyWebSocketServerInfo(info: WebSocketServerInfo): void {
@@ -717,9 +742,11 @@ export class DebugRouterConnector {
   }
 
   private shouldExposeWebSocketState(): boolean {
+    // Host may send the initial snapshot before startWSServer returns and sets wss.
     return Boolean(
-      this.enableWebSocket &&
-        (this.wss !== null || this.startingWSServer),
+      !this.closed &&
+        this.enableWebSocket &&
+        (this.wss !== null || this.desiredWSServerStarted),
     );
   }
 
@@ -728,7 +755,15 @@ export class DebugRouterConnector {
     this.scheduleDesiredRecovery();
   }
 
+  private clearDesiredRecoveryTimer(): void {
+    if (this.desiredRecoveryTimer) {
+      clearTimeout(this.desiredRecoveryTimer);
+      this.desiredRecoveryTimer = null;
+    }
+  }
+
   private scheduleDesiredRecovery(): void {
+    // Stop recovery after close and reuse any already scheduled retry.
     if (this.closed) {
       return;
     }
@@ -736,12 +771,15 @@ export class DebugRouterConnector {
       return;
     }
 
+    // Reconnect after a short delay and restore previously requested discovery, watchers, and WebSocket startup.
     this.desiredRecoveryTimer = setTimeout(() => {
+      // Release the timer before recovery so a failed attempt can schedule another retry.
       this.desiredRecoveryTimer = null;
       void this.restoreDesiredState().catch((error: Error) => {
         defaultLogger.warn(
           `Failed to restore desired multiplexer state after daemon reconnect: ${error.message}`,
         );
+        // Keep retrying at the same interval until recovery succeeds or the connector closes.
         this.scheduleDesiredRecovery();
       });
     }, DESIRED_RECOVERY_RETRY_DELAY_MS);
@@ -750,6 +788,7 @@ export class DebugRouterConnector {
   private async restoreDesiredState(): Promise<void> {
     await this.daemonClient.connect();
 
+    // Restore discovery before watchers so device mirrors exist when clients arrive.
     if (this.desiredDeviceDiscoveryStarted) {
       const snapshots = await this.daemonClient.call("connectDevices", {
         timeout: -1,
@@ -763,13 +802,14 @@ export class DebugRouterConnector {
     }
 
     if (this.desiredWSServerStarted && this.wss === null) {
-      await this.ensureWSServerStarted();
+      await this.startWSServer();
     }
   }
 
   private clearDaemonMirrors(): void {
     this.wss = null;
 
+    // Notify client disconnections before removing their parent devices; leave shared resources to Host.
     for (const id of Array.from(this.usbClients.keys())) {
       this.unregisterUsbClientInternal(id);
     }
@@ -779,25 +819,20 @@ export class DebugRouterConnector {
     }
   }
 
-  getDriverClient(): DriverClient {
-    return this.driverClient;
-  }
-
-  applySnapshot(snapshot: Snapshot): void {
-    const activeDeviceSerials = this.upsertDeviceSnapshotState(
-      snapshot.devices,
-    );
-    this.syncClientSnapshots(snapshot.clients);
-    if (this.shouldExposeWebSocketState() && snapshot.websocketAppClients) {
-      this.syncWebSocketAppSnapshots(snapshot.websocketAppClients);
+  private clearWebSocketClientMirrors(): void {
+    for (const id of Array.from(this.websocketAppClients.keys())) {
+      this.websocketAppClients.delete(id);
+      this.emit("websocket-app-client-disconnected", id as any);
+      this.emit("app-client-disconnected", id as any);
     }
-    if (this.shouldExposeWebSocketState() && snapshot.websocketWebClients) {
-      this.syncWebSocketWebSnapshots(snapshot.websocketWebClients);
+    for (const id of Array.from(this.websocketWebClients.keys())) {
+      this.websocketWebClients.delete(id);
+      this.emit("websocket-web-client-disconnected", id as any);
     }
-    this.removeStaleDevices(activeDeviceSerials);
   }
 
   applyHostEvent(event: ControlEvent): void {
+    // Translate daemon events into local mirrors and the existing Connector event API.
     switch (event.event) {
       case "report":
         if (!this.closed) {
@@ -809,19 +844,24 @@ export class DebugRouterConnector {
         }
         break;
       case "snapshot":
+        // Reconcile device/client mirrors, including clients removed from the snapshot.
         this.applySnapshot(event.data);
         break;
       case "legacy-ownership-changed":
+        // Update legacy multi-open status and clear the selection when ownership is lost.
         this.applyLegacyOwnershipChange(event.data.status);
         break;
       case "client-message":
+        // USB runtime messages use the existing USB client dispatch path.
         if (event.data.source === "usb-runtime") {
           this.handleUsbMessage(event.data.id, event.data.message);
           break;
         }
+        // Expose shared WebSocket messages only when this facade has requested startup.
         if (!this.shouldExposeWebSocketState()) {
           break;
         }
+        // Keep app runtime messages separate from WebSocket Driver frontend messages.
         this.emit(
           event.data.source === "websocket-runtime"
             ? "ws-client-message"
@@ -833,6 +873,80 @@ export class DebugRouterConnector {
         );
         break;
     }
+  }
+
+  applySnapshot(snapshot: Snapshot): void {
+    // Add devices before clients, then remove stale devices after client disconnection events.
+    const activeDeviceSerials = this.upsertDeviceSnapshotState(
+      snapshot.devices,
+    );
+    this.syncClientSnapshots(snapshot.clients);
+    if (this.shouldExposeWebSocketState() && snapshot.websocketAppClients) {
+      this.syncWebSocketSnapshots(snapshot.websocketAppClients, "app");
+    }
+    if (this.shouldExposeWebSocketState() && snapshot.websocketWebClients) {
+      this.syncWebSocketSnapshots(snapshot.websocketWebClients, "web");
+    }
+    this.removeStaleDevices(activeDeviceSerials);
+  }
+
+  private syncClientSnapshots(snapshots: Snapshot["clients"]): void {
+    const enabledSnapshots = this.filterClientSnapshots(snapshots);
+    const activeIds = new Set(enabledSnapshots.map((snapshot) => snapshot.id));
+    this.upsertClientSnapshots(enabledSnapshots);
+
+    for (const id of Array.from(this.usbClients.keys())) {
+      if (!activeIds.has(id)) {
+        this.unregisterUsbClientInternal(id);
+      }
+    }
+  }
+
+  private syncWebSocketSnapshots(
+    snapshots: WebSocketClientSnapshot[],
+    target: "app" | "web",
+  ): void {
+    // App and Driver client IDs may overlap, so reconcile each collection independently.
+    const clients =
+      target === "app" ? this.websocketAppClients : this.websocketWebClients;
+    const activeIds = new Set(snapshots.map((snapshot) => snapshot.id));
+    for (const snapshot of snapshots) {
+      this.upsertWebSocketSnapshot(snapshot, target);
+    }
+    for (const id of Array.from(clients.keys())) {
+      if (activeIds.has(id)) {
+        continue;
+      }
+      clients.delete(id);
+      this.emit(`websocket-${target}-client-disconnected`, id as any);
+      if (target === "app") {
+        this.emit("app-client-disconnected", id as any);
+      }
+    }
+  }
+
+  private upsertWebSocketSnapshot(
+    snapshot: WebSocketClientSnapshot,
+    target: "app" | "web",
+  ): MultiplexerWebSocketClient {
+    const clients =
+      target === "app" ? this.websocketAppClients : this.websocketWebClients;
+    const existing = clients.get(snapshot.id);
+    if (existing) {
+      // Preserve the proxy and its listeners; repeated snapshots must not emit another connection event.
+      return existing;
+    }
+    const client = MultiplexerWebSocketClient.fromSnapshot(
+      snapshot,
+      this.daemonClient,
+    );
+    clients.set(snapshot.id, client);
+    this.emit(`websocket-${target}-client-connected`, client as any);
+    // Only app runtimes also participate in the unified USB/WiFi app-client events.
+    if (target === "app") {
+      this.emit("app-client-connected", client as any);
+    }
+    return client;
   }
 
   private upsertDeviceSnapshotState(snapshots: DeviceSnapshot[]): Set<string> {
@@ -869,102 +983,6 @@ export class DebugRouterConnector {
       this.selectedClient = undefined;
     }
     this.multiOpenCallback?.statusChanged?.(nextStatus);
-  }
-
-  private syncClientSnapshots(snapshots: Snapshot["clients"]): void {
-    const enabledSnapshots = this.filterClientSnapshots(snapshots);
-    const activeIds = new Set(enabledSnapshots.map((snapshot) => snapshot.id));
-    this.upsertClientSnapshots(enabledSnapshots);
-
-    for (const id of Array.from(this.usbClients.keys())) {
-      if (!activeIds.has(id)) {
-        this.unregisterUsbClientInternal(id);
-      }
-    }
-  }
-
-  private syncWebSocketAppSnapshots(
-    snapshots: WebSocketClientSnapshot[],
-  ): void {
-    const activeIds = new Set(snapshots.map((snapshot) => snapshot.id));
-    for (const snapshot of snapshots) {
-      this.upsertWebSocketAppSnapshot(snapshot, true);
-    }
-    for (const id of Array.from(this.websocketAppClients.keys())) {
-      if (activeIds.has(id)) {
-        continue;
-      }
-      this.websocketAppClients.delete(id);
-      this.emit("websocket-app-client-disconnected", id as any);
-      this.emit("app-client-disconnected", id as any);
-    }
-  }
-
-  private clearWebSocketClientMirrors(): void {
-    for (const id of Array.from(this.websocketAppClients.keys())) {
-      this.websocketAppClients.delete(id);
-      this.emit("websocket-app-client-disconnected", id as any);
-      this.emit("app-client-disconnected", id as any);
-    }
-    for (const id of Array.from(this.websocketWebClients.keys())) {
-      this.websocketWebClients.delete(id);
-      this.emit("websocket-web-client-disconnected", id as any);
-    }
-  }
-
-  private syncWebSocketWebSnapshots(
-    snapshots: WebSocketClientSnapshot[],
-  ): void {
-    const activeIds = new Set(snapshots.map((snapshot) => snapshot.id));
-    for (const snapshot of snapshots) {
-      this.upsertWebSocketWebSnapshot(snapshot, true);
-    }
-    for (const id of Array.from(this.websocketWebClients.keys())) {
-      if (activeIds.has(id)) {
-        continue;
-      }
-      this.websocketWebClients.delete(id);
-      this.emit("websocket-web-client-disconnected", id as any);
-    }
-  }
-
-  private upsertWebSocketAppSnapshot(
-    snapshot: WebSocketClientSnapshot,
-    emitConnected: boolean,
-  ): MultiplexerWebSocketClient {
-    const existing = this.websocketAppClients.get(snapshot.id);
-    if (existing) {
-      return existing;
-    }
-    const client = MultiplexerWebSocketClient.fromSnapshot(
-      snapshot,
-      this.daemonClient,
-    );
-    this.websocketAppClients.set(snapshot.id, client);
-    if (emitConnected) {
-      this.emit("websocket-app-client-connected", client as any);
-      this.emit("app-client-connected", client as any);
-    }
-    return client;
-  }
-
-  private upsertWebSocketWebSnapshot(
-    snapshot: WebSocketClientSnapshot,
-    emitConnected: boolean,
-  ): MultiplexerWebSocketClient {
-    const existing = this.websocketWebClients.get(snapshot.id);
-    if (existing) {
-      return existing;
-    }
-    const client = MultiplexerWebSocketClient.fromSnapshot(
-      snapshot,
-      this.daemonClient,
-    );
-    this.websocketWebClients.set(snapshot.id, client);
-    if (emitConnected) {
-      this.emit("websocket-web-client-connected", client as any);
-    }
-    return client;
   }
 
   private upsertDeviceSnapshots(
@@ -1039,10 +1057,7 @@ export class DebugRouterConnector {
     return client;
   }
 
-  private unregisterDeviceInternal(
-    serial: string,
-    force: boolean,
-  ): void {
+  private unregisterDeviceInternal(serial: string, force: boolean): void {
     const device = this.devices.get(serial);
     if (!device) {
       defaultLogger.debug(
@@ -1084,6 +1099,7 @@ function createDaemonPhysicalConnectorOption(
   option: DebugRouterConnectorOption,
   useConnectorOptionFlags: boolean,
 ): PhysicalConnectorOption {
+  // Normal startup keeps shared capabilities available; debug mode uses this facade's exact flags.
   return {
     manualConnect: useConnectorOptionFlags
       ? option.manualConnect ?? false
@@ -1111,6 +1127,7 @@ function createDaemonPhysicalConnectorOption(
 function createDaemonConnectionTraceOption(
   option: DebugRouterConnectorOption,
 ): ConnectionTraceOptions | undefined {
+  // Pass a serializable absolute path because the daemon runs in a separate process and may have a different cwd.
   const connectionTrace = option.connectionTrace
     ? {
         enabled: option.connectionTrace.enabled,
