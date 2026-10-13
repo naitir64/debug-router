@@ -442,6 +442,60 @@ describe("PhysicalConnector", function () {
     }
   });
 
+  for (const count of [undefined, "3"]) {
+    it(`uses BaseDevice ports for IP-only network watches (DriverPortCount=${count})`, async function () {
+      const previous = process.env.DriverPortCount;
+      if (count === undefined) delete process.env.DriverPortCount;
+      else process.env.DriverPortCount = count;
+      const connector = createConnector();
+      try {
+        await connector.watchNetworkDeviceAtIp({ ip: "127.0.0.1" });
+        const expected = Array.from(
+          { length: count ? Number(count) : 19 },
+          (_, i) => 8901 + i
+        );
+        assert.deepStrictEqual(
+          connector.devices.get("127.0.0.1").ports,
+          expected
+        );
+        await connector.watchNetworkDeviceAtIp({
+          ip: "127.0.0.1",
+          port: [9000],
+        });
+        assert.deepStrictEqual(
+          connector.devices.get("127.0.0.1").ports,
+          expected
+        );
+        await connector.watchNetworkDeviceAtIp({ ip: "127.0.0.2", port: [] });
+        assert.deepStrictEqual(connector.devices.get("127.0.0.2").ports, []);
+      } finally {
+        if (previous === undefined) delete process.env.DriverPortCount;
+        else process.env.DriverPortCount = previous;
+        await connector.close();
+      }
+    });
+  }
+
+  it("uses default ports for an IP-only constructor network option", async function () {
+    const previous = process.env.DriverPortCount;
+    delete process.env.DriverPortCount;
+    const connector = createConnector({
+      enableNetworkDevice: true,
+      networkDeviceOpt: { ip: "127.0.0.1" },
+    });
+    try {
+      await connector.connectDevices();
+      assert.deepStrictEqual(
+        connector.devices.get("127.0.0.1").ports,
+        Array.from({ length: 19 }, (_, i) => 8901 + i)
+      );
+    } finally {
+      if (previous === undefined) delete process.env.DriverPortCount;
+      else process.env.DriverPortCount = previous;
+      await connector.close();
+    }
+  });
+
   it("deduplicates runtime watches against the constructor network option", async function () {
     const connector = createConnector({
       enableNetworkDevice: true,

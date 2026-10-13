@@ -343,7 +343,7 @@ The current method contracts are:
 | ------------------------------ | --------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------- |
 | `connectDevices`               | `{ timeout?, serial?, isAutoListenClients? }`       | `DeviceSnapshot[]`    | Start physical discovery and return the current matching devices.            |
 | `connectUsbClients`            | `{ deviceId, timeout?, waitTimeout?, clientName? }` | `ClientSnapshot[]`    | Start one device's runtime watcher and return the current matching runtimes. |
-| `watchNetworkDeviceAtIp`       | `{ ip, port: number[] }`                            | `{}`                  | Add a daemon-owned network device at runtime, deduplicated by IP.             |
+| `watchNetworkDeviceAtIp`       | `{ ip, port?: number[] }`                            | `{}`                  | Add a daemon-owned network device at runtime, deduplicated by IP.             |
 | `startDeviceClientWatcher`     | `{ deviceId }`                                      | `{}`                  | Start one device's runtime watcher without returning a snapshot.             |
 | `stopDeviceClientWatcher`      | `{ deviceId }`                                      | `{}`                  | Stop one device's runtime watcher without disconnecting the device.          |
 | `disconnectDevice`             | `{ deviceId }`                                      | `{}`                  | Disconnect one physical device.                                              |
@@ -369,8 +369,10 @@ Single-device watching uses separate `startDeviceClientWatcher({ deviceId })` an
 
 The default RPC timeout is 5000 ms. RPCs with a positive operation `timeout` use `max(rpcTimeout, timeout + 1000ms)`; RPCs without an operation timeout continue to use the default timeout, with no method-specific exception.
 
-`watchNetworkDeviceAtIp` requires a non-empty `ip` and a numeric `port` array;
-it does not restrict the numbers to integers or a port range. An empty array registers only the device. Host
+`watchNetworkDeviceAtIp` requires a non-empty `ip` and accepts an optional numeric `port` array;
+it does not restrict the numbers to integers or a port range. Omitting `port` uses
+BaseDevice defaults (8901–8919, with the count overridable by `DriverPortCount`).
+An explicit empty array registers only the device. Host
 delegates to `PhysicalConnector`, which retains one manager per IP, including
 the constructor-configured network device. The first ports for that IP win.
 Host sends a snapshot to each caller even when a repeated watch emits no new

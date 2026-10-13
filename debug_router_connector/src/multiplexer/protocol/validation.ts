@@ -319,8 +319,8 @@ export function isControlRpcParams(
       return (
         isString(params.ip) &&
         params.ip.length > 0 &&
-        isNumberArray(params.port) &&
-        Object.keys(params).length === 2
+        isOptional(params.port, isNumberArray) &&
+        Object.keys(params).every((key) => key === "ip" || key === "port")
       );
     case "startDeviceClientWatcher":
     case "stopDeviceClientWatcher":

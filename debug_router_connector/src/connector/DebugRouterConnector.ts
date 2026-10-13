@@ -74,7 +74,7 @@ type WebSocketServerCompat = {
  * | adbHostPort                  | ADB server endpoint; optional host and port use transport defaults. |
  * | hdcHostPort                  | HDC server endpoint; optional host and port use transport defaults. |
  * | usbConnectOpt                | USB connection settings; retryTime is in ms, default/minimum 3000.  |
- * | networkDeviceOpt             | Network target: required IP and array of debugger client ports.     |
+ * | networkDeviceOpt             | Network target: required IP and optional debugger client ports.     |
  * | websocketOption              | Optional shared WebSocket settings; see nested fields below.        |
  * | websocketOption.port         | Legacy compatibility field; ignored, port selection starts at 19783. |
  * | websocketOption.roomId       | Optional room identifier returned in WebSocket RoomJoined.          |
@@ -386,7 +386,7 @@ export class DebugRouterConnector {
 
   async watchNetworkDeviceAtIp(options: {
     ip: string;
-    port: number[];
+    port?: number[];
   }): Promise<void> {
     await this.daemonClient.call("watchNetworkDeviceAtIp", options);
   }

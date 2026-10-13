@@ -104,6 +104,24 @@ async function main() {
     };
     await Promise.all([roundTrip(first, "first"), roundTrip(peer, "peer")]);
     console.log("[multiplexer-network-runtime-e2e] message routing passed");
+    await first.watchNetworkDeviceAtIp({ ip: "127.0.0.3" });
+    await waitFor(
+      () => peer.devices.has("127.0.0.3"),
+      "IP-only watch snapshot"
+    );
+    const defaultPorts = Array.from(
+      { length: Number(process.env.DriverPortCount || 19) },
+      (_, index) => 8901 + index
+    );
+    for (const connector of [first, peer]) {
+      assert.deepStrictEqual(
+        connector.devices.get("127.0.0.3").ports,
+        defaultPorts
+      );
+    }
+    console.log(
+      "[multiplexer-network-runtime-e2e] IP-only watch uses default ports on both facades"
+    );
   } finally {
     try {
       for (const connector of connectors) await connector.close();

@@ -274,10 +274,11 @@ describe("DebugRouterConnector multiplexer facade", function () {
       const options = { ip: "127.0.0.1", port: [8901] };
       await connector.watchNetworkDeviceAtIp(options);
       await connector.watchNetworkDeviceAtIp(options);
-      assert.deepStrictEqual(
-        state.clients[0].calls,
-        Array(2).fill({ method: "watchNetworkDeviceAtIp", params: options })
-      );
+      await connector.watchNetworkDeviceAtIp({ ip: "127.0.0.3" });
+      assert.deepStrictEqual(state.clients[0].calls, [
+        ...Array(2).fill({ method: "watchNetworkDeviceAtIp", params: options }),
+        { method: "watchNetworkDeviceAtIp", params: { ip: "127.0.0.3" } },
+      ]);
       connector.applySnapshot({
         protocolVersion: 1,
         generatedAt: 1,
@@ -291,7 +292,7 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(connector.devices.size, 0);
       assert.strictEqual(connector.usbClients.size, 0);
       await connector.restoreDesiredState();
-      assert.strictEqual(state.clients[0].calls.length, 2);
+      assert.strictEqual(state.clients[0].calls.length, 3);
     } finally {
       await connector.close();
       restore();
@@ -1324,7 +1325,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
 
       assert.deepStrictEqual(state.clients[0].calls, []);
       assert.strictEqual(warnings.length, 2);
-      assert.ok(warnings.every((message) => message.includes("handleWsMessage")));
+      assert.ok(
+        warnings.every((message) => message.includes("handleWsMessage"))
+      );
     } finally {
       restore();
     }
@@ -1404,7 +1407,11 @@ describe("DebugRouterConnector multiplexer facade", function () {
   });
 
   for (const fails of [false, true]) {
-    it(`forwards concurrent websocket starts and ${fails ? "clears mirrors on shared failure" : "preserves snapshots on shared success"}`, async function () {
+    it(`forwards concurrent websocket starts and ${
+      fails
+        ? "clears mirrors on shared failure"
+        : "preserves snapshots on shared success"
+    }`, async function () {
       let resolveStart;
       let rejectStart;
       const sharedStart = new Promise((resolve, reject) => {
@@ -1421,7 +1428,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
       try {
         const starts = [connector.startWSServer(), connector.startWSServer()];
         const completed = fails
-          ? Promise.all(starts.map((start) => assert.rejects(start, /startup failed/)))
+          ? Promise.all(
+              starts.map((start) => assert.rejects(start, /startup failed/))
+            )
           : Promise.all(starts);
         assert.strictEqual(state.clients[0].calls.length, 2);
         connector.applySnapshot({
@@ -1439,7 +1448,10 @@ describe("DebugRouterConnector multiplexer facade", function () {
           resolveStart({ port: 8888, host: "127.0.0.1:8888" });
         }
         await completed;
-        assert.strictEqual(connector.getAllWebsocketAppClients().length, fails ? 0 : 1);
+        assert.strictEqual(
+          connector.getAllWebsocketAppClients().length,
+          fails ? 0 : 1
+        );
         if (fails) {
           assert.strictEqual(connector.wss, null);
           assert.notStrictEqual(connector.desiredRecoveryTimer, null);
@@ -1456,9 +1468,15 @@ describe("DebugRouterConnector multiplexer facade", function () {
   it("does not restore websocket state when a pending start completes after close", async function () {
     let finishStart;
     const { DebugRouterConnector, state, restore } = loadConnectorWithFakes({
-      results: [["startWSServer", () => new Promise((resolve) => {
-        finishStart = resolve;
-      })]],
+      results: [
+        [
+          "startWSServer",
+          () =>
+            new Promise((resolve) => {
+              finishStart = resolve;
+            }),
+        ],
+      ],
     });
     const connector = new DebugRouterConnector({
       manualConnect: true,
@@ -2253,7 +2271,9 @@ describe("DebugRouterConnector multiplexer facade", function () {
       assert.strictEqual(connector.createClientId(), -1);
       assert.strictEqual(connector.createClientId(), -1);
       assert.strictEqual(warnings.length, 2);
-      assert.ok(warnings.every((message) => message.includes("createClientId")));
+      assert.ok(
+        warnings.every((message) => message.includes("createClientId"))
+      );
       assert.strictEqual(connector.getDriverClient().clientId(), 1);
     } finally {
       restore();

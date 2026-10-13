@@ -103,7 +103,7 @@ export type ControlRpcParams = {
   };
   watchNetworkDeviceAtIp: {
     ip: string;
-    port: number[];
+    port?: number[];
   };
   startDeviceClientWatcher: {
     deviceId: string;

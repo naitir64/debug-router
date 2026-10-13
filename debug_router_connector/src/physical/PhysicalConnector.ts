@@ -44,7 +44,7 @@ export type PhysicalConnectorOption = {
   networkDeviceOpt?: {
     ip: string;
     // a network device can have multi debugger clients
-    port: number[];
+    port?: number[];
   };
   traceRecorder?: ConnectionTraceRecorder | null;
 };
@@ -63,7 +63,7 @@ export class PhysicalConnector {
   private readonly networkDeviceOpt:
     | {
         ip: string;
-        port: number[];
+        port?: number[];
       }
     | undefined;
   readonly adbOption: any;
@@ -182,7 +182,7 @@ export class PhysicalConnector {
 
   async watchNetworkDeviceAtIp(options: {
     ip: string;
-    port: number[];
+    port?: number[];
   }): Promise<void> {
     if (this.networkDeviceManagers.has(options.ip)) {
       return;
