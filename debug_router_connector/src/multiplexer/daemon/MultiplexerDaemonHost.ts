@@ -50,6 +50,7 @@ import {
 } from "../../trace/ConnectionTraceRecorder";
 
 const DEFAULT_DEV_SERVE_PORT = 19783;
+const DEFAULT_WEBSOCKET_START_TIMEOUT_MS = 5000;
 
 export type PendingTargetSeed = {
   /**
@@ -109,10 +110,11 @@ export type MultiplexerDaemonHostOption = {
    * | memoizedNotificationTtlMs     | Cache/pending validity and retry interval, in ms.   |
    *
    * Test or embedding overrides:
-   * | Option            | Description                                        |
-   * | ----------------- | -------------------------------------------------- |
-   * | physicalConnector | Physical connector instance to use instead of new. |
-   * | now               | Clock function; defaults to Date.now.              |
+   * | Option                   | Description                                        |
+   * | ------------------------ | -------------------------------------------------- |
+   * | physicalConnector        | Physical connector instance to use instead of new. |
+   * | webSocketStartTimeoutMs  | WebSocket startup timeout; defaults to 5000 ms.    |
+   * | now                      | Clock function; defaults to Date.now.              |
    */
   controlEndpoint: string;
   protocolVersion: number;
@@ -130,6 +132,7 @@ export type MultiplexerDaemonHostOption = {
 
   // only used for tests or embedding
   physicalConnector?: PhysicalConnector;
+  webSocketStartTimeoutMs?: number;
   now?: () => number;
 };
 
@@ -160,7 +163,6 @@ export class MultiplexerDaemonHost {
   /**
    * Consumer IDs serve different roles:
    * - activeControlIds: Connected Connector control sessions that keep the daemon alive.
-   * - reportControlIds: Control sessions eligible to forward daemon reports.
    * - webSocketRequesterControlIds: Control sessions subscribed through startWSServer.
    * - activeWebSocketDriverIds: WebSocket frontends that also keep the daemon alive.
    */
@@ -278,15 +280,14 @@ export class MultiplexerDaemonHost {
 
   // Stops daemon services and releases shared connections, pending requests, and tracing resources.
   async stop(): Promise<void> {
-    this.reportBridge.close();
-    this.reportControlIds.clear();
-    setDriverReportService(null);
-
     // Closing is terminal. Repeated or concurrent requests return while the first stop cleans up.
     if (this.lifecycleStatus === "closed") {
       return;
     }
     this.lifecycleStatus = "closed";
+    this.reportBridge.close();
+    this.reportControlIds.clear();
+    setDriverReportService(null);
 
     // Serialize shutdown after any in-flight startup so stop cannot race controlServer.start().
     if (this.startingPromise) {
@@ -493,7 +494,6 @@ export class MultiplexerDaemonHost {
     this.updateReportStatus();
   }
 
-  // Forward reports through one eligible Connector to avoid duplicate reporting.
   private updateReportStatus(): void {
     // Take the first value in the Set, or null when the Set is empty.
     const [controlId = null] = this.reportControlIds;
@@ -810,9 +810,14 @@ export class MultiplexerDaemonHost {
   }
 
   private closeClient(clientId: number): void {
-    const websocketClient = this.getWebSocketAppClients()?.get(clientId);
-    if (websocketClient) {
-      websocketClient.close();
+    const websocketAppClient = this.getWebSocketAppClients()?.get(clientId);
+    if (websocketAppClient) {
+      websocketAppClient.close();
+      return;
+    }
+    const websocketWebClient = this.getWebSocketWebClients()?.get(clientId);
+    if (websocketWebClient) {
+      websocketWebClient.close();
       return;
     }
     this.physicalConnector.closeClient(clientId);
@@ -926,13 +931,45 @@ export class MultiplexerDaemonHost {
       port: "wssPort:" + wssHost,
     });
 
-    await new Promise<void>((resolve) => {
-      this.webSocketController = new WebSocketController(this, {
-        port: wssPort,
-        host: wssHost,
-        roomId: this.option.websocketOption?.roomId,
-        callback: resolve,
-      });
+    const startTimeoutMs =
+      this.option.webSocketStartTimeoutMs ?? DEFAULT_WEBSOCKET_START_TIMEOUT_MS;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(
+          new Error(
+            `Timed out after ${startTimeoutMs}ms waiting for WebSocket server startup`,
+          ),
+        );
+      }, startTimeoutMs);
+
+      const settle = (error?: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      };
+
+      try {
+        this.webSocketController = new WebSocketController(this, {
+          port: wssPort,
+          host: wssHost,
+          roomId: this.option.websocketOption?.roomId,
+          callback: settle,
+        });
+      } catch (error) {
+        settle(error instanceof Error ? error : new Error(String(error)));
+      }
     });
     return info;
   }

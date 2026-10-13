@@ -384,6 +384,13 @@ export class DebugRouterConnector {
     return this.upsertClientSnapshots(snapshots);
   }
 
+  async watchNetworkDeviceAtIp(options: {
+    ip: string;
+    port: number[];
+  }): Promise<void> {
+    await this.daemonClient.call("watchNetworkDeviceAtIp", options);
+  }
+
   selecteUsbClient(id: number): void {
     if (this.usbClients.has(id)) {
       this.selectedClient = this.usbClients.get(id);
@@ -394,14 +401,6 @@ export class DebugRouterConnector {
     defaultLogger.warn(
       "addDeviceManager is ignored by the Multiplexer-only DebugRouterConnector; physical device managers live in the daemon.",
     );
-  }
-
-  /** Watch network devices through the shared daemon. */
-  async watchNetworkDeviceAtIp(options: {
-    ip: string;
-    port: number[];
-  }): Promise<void> {
-    await this.daemonClient.call("watchNetworkDeviceAtIp", options);
   }
 
   on<Event extends keyof DebugerRouterDriverEvents>(

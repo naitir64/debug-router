@@ -637,7 +637,14 @@ describe("MultiplexerDaemonClient", function () {
   it("advertises the report flag on every registration, including reconnect", async function () {
     await start({ reportServiceEnabled: true });
     await client.connect();
-    await client.closeSocket(new Error("Test control connection disconnected"));
+    // close() is terminal in MR6; simulate a remote disconnect to reconnect.
+    const disconnected = new Promise((resolve) => {
+      client.subscribeConnectionEvent((event) => {
+        if (event.state === "disconnected") resolve();
+      });
+    });
+    await server.connections.get(connectedIds[0]).close();
+    await disconnected;
     await client.connect();
     assert.deepStrictEqual(reportFlags, [true, true]);
     const report = {
