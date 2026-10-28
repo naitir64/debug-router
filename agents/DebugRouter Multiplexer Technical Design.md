@@ -362,7 +362,7 @@ The current method contracts are:
 | `startWSServer`                | `{}`                                                | `WebSocketServerInfo` | Start or reuse the WebSocket server and return `{ port, host, roomId? }`.    |
 | `startAllDeviceClientWatchers` | `{}`                                                | `{}`                  | Watch all current devices and automatically watch later devices.             |
 | `stopAllDeviceClientWatchers`  | `{}`                                                | `{}`                  | Stop all watchers and disable automatic watching for later devices.          |
-| `sendMessageWithReply`         | `{ clientId, message: RequireMessageType }`         | `ResponseMessageType` | Send a request-response message to one USB or WiFi runtime.                  |
+| `sendMessageWithReply`         | `{ clientId, message: RequireMessageType, timeout? }` | `ResponseMessageType` | Send a request-response message to one USB or WiFi runtime.                  |
 | `sendMessageWithoutReply`      | `{ target: "app" \| "web", clientId, message }`     | `{}`                  | Send a fire-and-forget message to an App runtime or WebSocket Driver.        |
 | `closeClient`                  | `{ clientId }`                                      | `{}`                  | Close one USB, WiFi runtime, or WebSocket Driver client.                    |
 
@@ -599,6 +599,7 @@ type PendingRoute = {
   requesterId: number;
   originalId: number;
   clientId: number;
+  timeoutMs?: number;
   createdAt: number;
   timer: ReturnType<typeof setTimeout>;
   resolve?: (value: unknown) => void;
@@ -606,7 +607,7 @@ type PendingRoute = {
 };
 ```
 
-The route timeout defaults to 5000 ms. Control route timeout rejects the corresponding Promise; WebSocket route timeout only removes the mapping.
+The route timeout defaults to 5000 ms. `sendMessageWithReply` accepts an optional per-request `timeout` in milliseconds, passed to `PendingRouteTable` as `timeoutMs`; other routes keep their defaults. The value must be a non-negative number. `0` expires on the next timer turn, not an unlimited wait. USB and WebSocket client mirrors returned by the Connector facade explicitly pass `timeout: 60000`, so normal request-response calls keep their routes for 60 seconds. The existing RPC client waits for `max(configuredRpcTimeout, timeout + 1000)` ms when this parameter is supplied, giving these mirror calls at least 61 seconds. Control route timeout rejects the corresponding Promise; WebSocket route timeout only removes the mapping. Disconnect cleanup still cancels routes immediately.
 
 Outbound handling:
 

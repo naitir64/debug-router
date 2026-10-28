@@ -20,10 +20,13 @@ import { getAdbToolPath } from "../../utils/adb.validator";
 import ForwardCommand from "@devicefarmer/adbkit/dist/src/adb/command/host-serial/forward";
 import ListForwardsCommand from "@devicefarmer/adbkit/dist/src/adb/command/host-serial/listforwards";
 import { withAdbConnection } from "../../utils/adb.connection";
+import { AdbHealthGuard } from "./AdbHealthGuard";
 
 export default class AndroidDevice extends BaseDevice {
   private adb: ADBClient;
   private static readonly localBasePort: number = 10000;
+  private readonly healthGuard: AdbHealthGuard;
+  private readonly forwardedPorts = new Map<number, number>();
 
   get ports() {
     return this.port;
@@ -42,6 +45,9 @@ export default class AndroidDevice extends BaseDevice {
       title,
     });
     this.adb = adb;
+    this.healthGuard = new AdbHealthGuard(adb, serial, (error) => {
+      this.driver.emit("connector-error", error);
+    });
   }
 
   getHost(): string {
@@ -52,7 +58,24 @@ export default class AndroidDevice extends BaseDevice {
     await this.forward(this.remotePorts);
   }
 
+  async checkClientPort(port: number): Promise<"ready" | "skip" | "pause"> {
+    if (!this.connected) return "pause";
+    const remotePort = this.forwardedPorts.get(port);
+    if (remotePort === undefined) return "skip";
+    const result = await this.healthGuard.check(remotePort);
+    return this.connected && this.forwardedPorts.get(port) === remotePort
+      ? result
+      : "pause";
+  }
+
+  disconnect() {
+    this.healthGuard.close();
+    this.forwardedPorts.clear();
+    super.disconnect();
+  }
+
   private async forward(remotePorts: number[]) {
+    this.forwardedPorts.clear();
     const device = this.adb.getDevice(this.serial);
     if (!device) {
       defaultLogger.debug("device not found by serial:" + this.serial);
@@ -104,6 +127,7 @@ export default class AndroidDevice extends BaseDevice {
               "adb forward success:" + remotePort + " hostport:" + hostport,
             );
             this.port.push(hostport);
+            this.forwardedPorts.set(hostport, remotePort);
             break;
           } else {
             tryCount++;

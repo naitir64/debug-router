@@ -28,6 +28,54 @@ describe("multiplexer integration routing isolation", function () {
     }
   });
 
+  it("waits beyond five seconds only for sendMessageWithReply requests with an extended timeout", async function () {
+    context = createIntegrationContext("routing-reply-timeout", {
+      state: {
+        responseDelayMs: 5500,
+        devices: [{
+          serial: "device-1",
+          os: "Android",
+          ports: [9001],
+          host: "127.0.0.1",
+        }],
+        clients: [{ id: 1, deviceId: "device-1", port: 9001 }],
+      },
+    });
+    const client = context.createClient({ rpcTimeout: 5000 });
+    await client.call("connectDevices", {});
+    await client.call("connectUsbClients", { deviceId: "device-1" });
+    const connector = context.createConnector({ rpcTimeout: 5000 });
+    await connector.connectDevices();
+    const [mirror] = await connector.connectUsbClients("device-1");
+
+    // Direct RPC requests share an original ID but keep separate timeouts and routes.
+    const send = (marker, timeout) =>
+      client.call("sendMessageWithReply", {
+        clientId: 1,
+        message: JSON.parse(createCustomizedEnvelope(1, 77, marker)),
+        ...(timeout === undefined ? {} : { timeout }),
+      });
+    const startedAt = Date.now();
+    const [response, mirrorResponse] = await Promise.all([
+      send("extended", 60000),
+      mirror.sendCustomizedMessage("Runtime.enable", { marker: "facade" }, 1),
+      assert.rejects(send("default"), /Timed out/),
+      assert.rejects(
+        send("short", 100),
+        /Timed out waiting for response to global message id/
+      ),
+    ]);
+
+    assert(Date.now() - startedAt >= 5000);
+    const parsed = parseCustomizedEnvelope(JSON.stringify(response));
+    assert.strictEqual(parsed.cdp.id, 77);
+    assert.deepStrictEqual(parsed.cdp.result.params, { marker: "extended" });
+    assert.deepStrictEqual(JSON.parse(mirrorResponse).result.params, {
+      marker: "facade",
+    });
+    assert.strictEqual(client.pendingRpc.size, 0);
+  });
+
   it("routes duplicate WebSocket request ids back only to the originating frontend", async function () {
     context = createIntegrationContext("routing-websocket", {
       enableWebSocket: true,
